@@ -1,0 +1,2 @@
+0:0:0:0:0:0:0:1 - - [02/Nov/2020:20:18:16 +0800] "GET /security-springMVC HTTP/1.1" 302 - http-bio-8080-exec-2 0
+0:0:0:0:0:0:0:1 - - [02/Nov/2020:20:18:17 +0800] "GET /security-springMVC/ HTTP/1.1" 200 328 http-bio-8080-exec-3 1198
