@@ -49,8 +49,8 @@ public class LoginController {
     @RequestMapping(value = "/r/r1",method = RequestMethod.GET
             ,produces = "application/json;charset=utf-8")
     @ResponseBody
-    @PreAuthorize("isAnonymous()")  //匿名访问
-
+//    @PreAuthorize("isAnonymous()")  //匿名访问
+    @PreAuthorize("hasAuthority('p1')")  // 拥有p1权限才能访问
     public String r1(){
         return "访问r1成功";
     }
@@ -58,7 +58,14 @@ public class LoginController {
     @RequestMapping(value = "/r/r2",method = RequestMethod.GET
             ,produces = "application/json;charset=utf-8")
     @ResponseBody
+//    @PreAuthorize("hasAuthority('p2')")
+    @PreAuthorize("isAnonymous()")
     public String r2(){
         return "访问r2成功";
+    }
+    @RequestMapping("/test")
+    @ResponseBody
+    public String test(){
+        return "success";
     }
 }

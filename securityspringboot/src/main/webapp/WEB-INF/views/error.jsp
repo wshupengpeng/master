@@ -11,6 +11,6 @@
     <title>登录失败</title>
 </head>
 <body>
-    <a href="/security-springboot/">点击登录</a>
+    <a href="/">点击登录</a>
 </body>
 </html>
