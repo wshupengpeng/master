@@ -1,0 +1,167 @@
+netty学习笔记:
+	netty的核心组件
+	1 Channel：
+		channel是java NIO的一个基本构造，
+			它代表一个到实体（如一个硬件设备、一个文件、一个网络套接字或者一个能够执行一个或者多个不同
+			的I/O操作的程序组件）的开放链接，如读操作和写操作。
+	NIO中常见channel值：
+		1 FileChannel:用于文件的数据读写
+		2 DatagramChannel:用于UDP的数据读写
+		3 SocketChannel:用于TCP的数据读写，一般是客户端实现
+		4 ServerSocketChannel:允许我们监听TCP链接请求，每个请求会创建会一个SocketChannel，一般是服务器实现
+	2 回调
+		回调作为一个方法，只想一个已经提供给另外一个方法的引用，使得后者在适当的时候调用前者，是操作完成后通知的
+		一种常见方法。
+	3 Futrue： javaNIO提供，伪异步方式，get方法会阻塞，直到结果返回。
+	netty提供了ChannelFutrue，可以注册监听方式进行异步方式，相对来讲比Futrue更好用。netty本身完全是异步和事件驱动的。
+	4 事件和channelHandler
+	netty是异步时间驱动的网络模型，通过event触发相应的处理器，来处理相应的事件结果，netty姣好的封装，开发人员只需要编写channelHandler的代码，而不需要
+	处理网络请求的字符编解码、epoll模型轮询等操作，大大简化了操作。
+
+	
+第三章：
+ 3.1 channel、EventLoop和channelFuture
+  3.1.1 channel 接口
+	基本的I/O操作(bind()、connet()、read()和write()) 依赖于底层网络传输所提供的原语。在java网络编程中，其基本构造是class socket。netty的channel接口所
+	提供的API，大大降低了直接使用Socket类的复杂性。此外channel还是拥有许多预定义的、专门化实现的广泛类层次结构的根，一下是一个简短的清单：
+	1 EmbeddedChannel
+	2 LocalServerChannel
+	3 NioDatagramChannel
+	4 NioSctpChannel
+	5 NioSocketChannel
+  3.1.2 EventLoop接口
+	channel-》将channel注册到eventLoop-》在整个生命周期内都使用eventLoop处理I/O事件
+	1 一个eventLoopGroup 包含一个或多个eventLoop
+	2 一个eventLoop在它的生命周期内只和一个Thread绑定
+	3 所有由EventLoop处理的I/O事件都将在它专有的Thread上被处理
+	4 一个channel在它的生命周期内只注册于一个EventLoop
+	5 一个EventLoop 可能会被分配给一个或多个Channel
+	提出问题： 那对于netty模型而言，一个channel仅能绑定一个eventloop，一个eventlopp只能使用一个thread处理是否高效，当channel注册到eventLoopgroup组后，
+	eventLoopgroup怎么分配channel注册到不同的eventLoop上，在性能上怎么领先于java nio的epoll模型？
+	答：channel绑定一个eventLoop是为了防止多线程导致channel被读取多次，而每一个eventLoop都相当于一个epoll模型，提高了处理效率
+	reactor相当于通过eventLoopgroup 来让多个epool模型处理event，而通过服务器端则是通过两个reactor来处理数据，两个reactor使用
+	两个eventLoopGroup，第一个eventloopgroup是为了让新的连接更快的进入subReactor模型中，如果只有一个reactor模型，那么当event
+	事件在同一时间触发多个的时候，会导致select时间处理过长，导致连接超时，而通过第一个reactor模型，会将已连接socket放入第二个
+	处理读写事件的reactor中，从而使得服务端的处理效率得到提升，并通过设置eventloop，来提高并行度。
+  3.1.3 channelFutrue
+	netty所有的I/O都是异步的，因此一个操作可能不会立即返回，因此netty提供了channelFuture接口，其addListener()方法注册了一个channelFutrueListener，以便
+	在某个操作完成时（无论是否成功）得到通知。
+  3.2 channelHandler和channelPipeline
+   3.2.1 channelHandler
+	netty的主要组件是channelHandler，它充当了所有处理入站和出站数据的应用程序编辑的容器。这个是可行的，因为channelHandler的方法是由网络事件触发的。
+	事实上，channelHandler可专门用于几乎任何类型的动作，例如将数据从一种格式转换为另外一种格式，或者在转换的过程中所跑出的异常。
+	channelInboundHandler是一个经常使用的经常实现的子接口，这种类型的channelHandler接收入站事件和数据，这些数据随后将会被你的应用程序的业务逻辑所处理。
+   3.2.2 channelPipeline
+	channelPipeline提供了channelHandler链的容器，并定义了用于该链上传播入站和出站事件流的API。当channel被创建时，它会被自动的分配到它的专属ChannelPipeline
+	channelHandler安装到channelPipeline中的过程如下所示：
+	1 一个channelInitalizer的实现被注册到了ServerBootstrap 中
+	2 当channelInitalizer.initChannel()方法被调用时，ChannelInitializer将在channelPipeline中安装一组自定义的channelHandler
+	3 channelInitializer将它自己从channelPipeline中移除。
+   3.2.3 更加深入的了解channelHandler
+	channelHandler子类：
+	channelhandlerAdapter
+	channelInboundHandler: simpleChannelInboundHandler<T> 是子类
+	channelOutboundHandler
+	channelDuplexHandler
+   3.2.4 编码器和解码器
+   对于网络数据而言，底层都是通过字节数组传递，因此netty底层对数据进行了编解码的封装，对于出站消息而言，需要进行编码，而入站则
+   需要解码，netty提供的编解码器都实现了channelOutboundHandler或者channelInboundHandler接口，对于入站消息而言，channelRead（）
+   方法/事件已经被重写，从每个channel中读取的消息都会被它预置的解码器提供的decode()方法调用，并将已解码的字节转发给channelpipeline
+   中的下一个channelInboundHandler。出站消息则是相反，编码器会将消息转换为字节，并转发给channelOutboundHandler。
+   3.2.5 抽象类simpleChannelInboundHandler
+   对于需要创建的channelHandler而言，你可以继承子类simpleChannelInboundHandler<T>，其中T为要处理成为的java类，其中最重要的方法
+   是channelRead0(channelHandlerContext ,T),如果你指定泛型，则read0回传泛型类，可以直接转化为你需要的java类。
+  3.3 引导
+	目前netty有两种类型的引导：
+	1 是基于客户端： bootstrap，用来连接远程主机和端口，eventloopgroup 只有1个
+	2 是基于服务端： serverbootstrap，绑定一个本地端口，eventloopgroup 有两个（也可以只有一个，当只有一个的时候，在当前场景下
+	共用一个eventLoopGroup）
+	为什么服务器要有两个eventLoopGroup？
+	第一个eventLoopGroup： 用来引导客户端的连接，
+第四章 传输
+ 4.1 案例研究：传输迁移
+  4.1.1 不通过netty使用的OIO和NIO
+  4.1.2 通过netty使用的OIO和NIO
+  以上两个小节是为了显示netty如何适配阻塞式网络编程和非阻塞式网络编程，突出netty的方便快捷，因为本身netty的代码没有什么变化
+  唯一变化的就是绑定的channel类和group类，一个是阻塞式的实例对象，一个是非阻塞的实例对象。
+ 4.2 传输API
+	netty的传输的核心API是channel，它被用于所有的I/O操作，channel的层次见图 4-1
+	channel本身的子类有 serverChannel和AbstractChannel,而channel则会被分配一个channelPipeline和ChannelConfig，其中channelConfig
+	是包含了该channel的所有配置设置，并且支持热更新，由于特定的传输可能具有独特的设置，所以它可能会实现一个channelConfig的子
+	类型。channel也实现了comparable接口因此，当两个不同的channel返回了相同的散列码，那么AbstractChannel中的compareTo()方法
+	的实现将会抛出一个Error。
+  此外channelPipeline持有所有将应用入站和出站数据以及事件的ChannelHandler实例，这些ChannelHandler实现了应用程序用于处理状态
+  变化以及数据处理的逻辑。
+	channelHandler的典型用于包括：
+	1 将数据从一种格式转换为另一种格式
+	2 提供异常的通知
+	3 提供channel变为活动的或者非活动的通知
+	4 提供当channel注册到EventLoop或者从EventLoop注销时的通知
+	5 提供有关用户自定义事件的通知
+	channel本身是一个线程安全的对象，因此你可以通过channel向远程节点写数据时，消息会保证按顺序发送，
+  4.3 内置的传输
+  netty所提供的传输：
+  1 NIO io.netty.channel.socket.nio 使用java.nio.channels 包作为基础---基于选择器的方式
+  2 Epoll io.netty.channel.epoll 由JNI驱动epoll()和非阻塞IO。这个传输支持只有在Linux上可用的多种特性，如SO_REUSEPORT比NIO传输更快，而且完全是非阻塞的。
+  3 OIO io.netty.channel.socket.oio 使用java.net包作为基础--使用阻塞流
+  4 Local io.netty.channel.local 可以在VM内部通过管道进行通信的本地传输
+  5 Embedded io.netty.channel.embedded Embedded传输，允许使用ChannelHandler而又不需要一个真正的基于网络的传输。这在测试你的
+  channelHandler实现时非常有效。
+  
+  4.3.1 NIO - 非阻塞I/O 
+  jdk1.4被引入，其中最重要的是select选择器，选择器背后的基本概念是充当一个注册表，在那里你的请求在Channel的状态发生变化时得到
+  通知，可能的变化如下:
+  1 新的channel 已经被接受并且就绪； accept
+  2 channel的连接已经完成；connect
+  3 channel中已有可供读取的数据； read
+  4 channel可用于写数据；writer
+  详情见4.3图
+  零拷贝（zero copy）： 目前是java nio 和epoll模型才可以使用的特性，是可以高效的将数据从文件系统移动到网络接口，而不需要将
+  其从内核状态复制到用户空间，也就是通过directBuffer，堆外缓冲区来进行的。
+  4.3.2 Epoll模型
+  netty的NIO是基于java提供的异步/非阻塞网络编程的通用抽象虽然保证了Netty在非阻塞API可以在任何平台上是以哦那个，但它也包含了相应
+  的限制，因为JDK为了在所有系统上提供相同的功能，必须做出妥协。
+  Linux平台在内核版本2.5.44引入了epoll模型，想比于旧的select和poll系统调用具有更好的性能，这个也是Linux上非阻塞网络编程的事实标准
+  netty为Linux提供了一组NIO API 模型，它更加一致的方式使用epoll，并且以一种更加轻量的方式使用中断，用法也是非常简单，只需要将NioEventLoopGroup
+  修改为EpollEventLoopGroup，将NioServerSocketChannel.class更改为EpollServerSocketChannel.class即可。
+  4.3.3 OIO -- 旧的阻塞I/O 
+  netty如何实现旧的阻塞模型：
+  netty通过使用SO_TIMEOUT标记，它指定了一个I/O操作完成的最大毫秒数，如果操作在这个事件内没有完成，则会抛出socketTimeOut Execption，Netty会捕获
+  这个异常并继续处理循环，在EventLoop下一次运行时，它将再次尝试。这也是netty这样异步框架支持OIO的唯一方式。
+  4.3.4 用JVM内部通信的Local的传输
+  在这个传输中，和服务器channel相关联的SocketAddress并没有绑定物理网络地址，相反，只要有服务器还在运行，它就会被存储到注册表中，并在channel关闭
+  时注销，因为这个传输并不接受真正的网络流量，所以它不能和其他的传输实现进行互操作。
+  4.3.5 Embedded 传输
+  Netty提供了一种额外的API，是的你可以将一组channelHandler作为帮助类嵌入到其他channelHandler中，通过这种方式，你可以扩展一个channelHandler的
+  功能，而又不需要修改其内部代码，详细见第九章。
+  
+  4.4 传输中的用例
+  略
+  
+  第五章 ByteBuf
+  ByteBuf的优点：
+  1 它可以被用户自定义的缓冲区类型扩展；
+  2 通过内置的复合缓冲区类型实现了零拷贝；
+  3 容量可以按需增长（类似于JDK的StringBuilder）
+  4 在读和写这两种模式不需要使用flip方法
+  5 读和写使用了不同的索引
+  6 支持方法的链式调用
+  7 支持引用计数
+  8 支持池化
+  5.2 ByteBuf -- netty的数据容器
+  5.2.1 它是如何工作的
+	
+  
+  
+  
+	
+记录问题：
+1 如何通过channelhandlerContext ctx 写出数据到服务端，而服务端又怎么将数据写出到客户端。
+2 写出数据是否可以使用channel或者ctx写出？还是只能用其中一个？
+	
+ 
+	
+	
+	
+	重点： 
+	需要学习mybatis的逆向工程，回头写一个通过json自动生成实体类。
