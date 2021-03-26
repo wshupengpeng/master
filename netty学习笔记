@@ -152,16 +152,132 @@ netty学习笔记:
   5.2.1 它是如何工作的
 	
   
+  5.3 字节级操作
+  5.3.1 随机访问索引
+  ByteBuf 的索引是从零开始的：第一个字节的索引是0，最后一个字节的索引总是capacity()-1,而与NIO byteBuffer不同的是，ByteBuf是通过readerIndex和
+  writerIndex来确定读写位置的，而bytebuffer因为只通过position一个索引位置确定读写位置，因此每次写完之后都需要调用filp来翻转缓冲区。
+  5.3.2 顺序访问索引
+  ByteBuf通过readerIndex、writerIndex和capacity将缓冲区分为3个区域，
+  1是可丢弃区域，指的是已读取的数据。
+  2是可读数据，即writerIndex-readerIndex ，cotent区域
+  3可写数据，capacity-writerIndex
+  5.3.3 可丢弃字节
+  byteBuf支持丢弃已读字节，通过discardReadBytes()方法，可以丢弃并回收空间，这个操作会将content复制到readerIndex前，除非真的需要否则不要这么
+  做，当内存十分宝贵的时候。
+  5.3.4 可读字节
+  ByteBuf可以通过read或者skip跳过当前readerIndex的位置
+  当被调用的方式是readBytes(ByteBuf dest); 时那么目标dest的writerIndex也将会增加,因为写入的数据多了，所以writerIndex就会增加。
+  5.3.5 可写字节
+  可以通过writeBytes 写入数据，如果写操作目标是ByteBuf，那么对应的dest的readerIndex也会增加相应的长度。
+  5.3.6索引管理
+  byteBuf也可以使用markReaderIndex()、markWriterIndex()、resetWriterIndex、resetReaderIndex来标记readerIndex和WriterIndex来标记和重置ByteBuf的
+  readerIndex和writerIndex。也可以使用clear方法将readerIndex和writerIndex都设置为0.但是这个比discardReader轻量的多，不会复制内存。
+  5.3.7查找操作
+  可以通过indexOf和foreachByte查找对应的byte值
+  5.3.8 派生缓冲区
+  派生缓冲区为ByteBuf提供了以专门的方式来呈现其内容的视图，此类视图是通过以下方法被创造的：
+  1 duplicate();   复制一个
+  2 slice();  同上
+  3 slice(int , int); 复制一个分片
+  4 Unpooled.unmodifiableBuffer();
+  5 order(ByteOrder); 排序复制一份
+  6 readSlice(int); 读取多少位复制一份，readIndex会改变
+  每一个方式都会返回新的ByteBuf，它具有自己的读索引、写索引和标记索引。其内部存储于JDK的ByteBuffer一样也是共享的，因此如果你修改了它的内容，也
+  同时修改了其对应的源实例，所以要小心。如果想要复制，请使用copy或者copy（int，int）方法，这个将会拥有独立的数据副本。
+  5.3.9 读/写操作
+  1 get() 和 set() 从给定索引读/写操作，不会引起索引值发生变化
+  2 read()和write() ,从给定的索引开始，并且会根据已经访问的字节数对索引进行调整。
+  5.4 ByteBufHolder 接口
+  不太理解，是一个支持池化的对象。可以支持Netty的高级特性。
+  5.5 ByteBuf分配
+  5.5.1 按需分配：ByteBufAllocator 接口
+  为了降低分配和释放内存的开销，netty通过了interface ByteBufAllocator实现了(ByteBuf的)池化，它可以用来分配我们所描述过的任意类型的ByteBuf实例，
+  使用池化是特定于应用程序的决定，其并不会以任何方式改变ByteBuf API（语义）
+  可以通过channel或者channelHandlerContext 获取一个ByteBufAllocator的引用。
+  ByteBufAllocator accoc=channel.alloc();
+  或者
+  ByteBufAllocator accoc=ctx.alloc();
+  netty 本身提供了两种ByteBufAllocator 的实现： PooledByteBufAllocator 和UnpooledByteBufAllocator.前者池化了ByteBuf的实例以提高性能并最大限度
+  地减少内存碎片。此实现使用了一种称之为jemalloc的已被大量现代操作系统所采用的高效方法来分配内存。后者不池化ByteBuf实例，并且每次它被调用时返
+  回一个新的实例。
+  5.5.2 unpooled 缓冲区
+  见 5-8图
+  5.5.3 ByteUtil 类
+	提供了操作ByteBuf的静态的辅助方法，这个API是通用的，并且与池化无关，所以这些方法已在分配类外部实现。
+	方法最有价值的是hexdump方法，以16进制的表示形式打印ByteBuf的内容。
+	equals 用来判断两个ByteBuf实例是否相等。
+  5.6 引用计数
+  主要是为了追踪某个特定对象的活动引用的数量，一个ReferenceCounted实现的实例通常以活动的引用计数为1开始，只要引用计数大于0，就能保证对象不会被
+  释放。当活动实例引用的数量减少到0时，该实例就会被释放。
+  
+  第六章：channelHandler 和 channelPipeline
+  6.1.1 channel的生命周期
+  interface channel 定义了一组和channelInboundHandler API密切相关的简单但功能强大的状态模型：
+  1 channelUnregistered  channel已经被创建，但是还没被注册到eventLoop中。
+  2 channelRegistered channel已经被注册到eventLoop中
+  3 channelActive channel处于活动状态（已经连接到它的远程节点）。它现在可以接收和发送数据了
+  4 channelInactive channel没有连接到远程节点
+  channel的生命周期如下：
+  channelRegistered -》channelactive -》 channelInactive -》 channelUnregistered
+  当前每一个阶段都会生成相应的事件，这些事件会被转发给channelpipeline 中的channelHandler中，其可以对相应的事件作出响应。
+  
+  6.1.2 channelHandler 的生命周期
+  1 channelAdded 当把channelHandler添加到channelpipleline中被调用
+  2 handlerRemoved 当把channelHandler移除到channelpipleline中被调用
+  3 exceptionCaught 当处理中产生异常时被调用
+  channelAdded-》handlerRemoved-》exceptionCaught
+  netty 定义了下面两个重要的channelHandler子接口：
+  1 channelInboundHandler--- 处理入站数据以及各种状态的变化
+  2 channelOutboundHandler --- 处理出站数据并且运行拦截所有的操作
+  
+  6.1.3 channelInboundHandler 接口
+  见6-3图，显示具有哪些事件触发被调用。
+  当某个channelInboundHandler 的实现重写了channelRead方法时，它将负责显式地释放与池化的ByteBuf实例相关的内存。Netty为此提供了ReferenceCountUtil
+  .release()释放。 如果没有释放，netty会用warn级别日志消息记录未释放的资源。一个更加简单的方式是通过SimpleChannelInboundHandler，但是问题在于
+  如果想要用通过frieUserEvent方法向下传递此对象，会导致报错，需要使用retain将其引用+1.
+  
+  6.1.4 channelOutboundHandler 接口
+   bind （ChannelHandlerContext ，SocketAddress，ChannelPromise）   当请求将channel绑定到本地地址时被调用
+   connect（ChannelHandlerContext ，SocketAddress，SocketAddress，ChannelPromise） 当请求将channel连接到远程节点时被调用
+   disconnect（ChannelHandlerContext，ChannelPromise） 当请求关闭channel时被调用
+   close（ChannelHandlerContext，ChannelPromise） 当请求关闭channel时被调用
+   deregister（ChannelHandlerContext，ChannelPromise） 当请求将channel从它的Eventloop注销时被调用
+   read（ChannelHandlerContext） 当请求从channel读取更多数据时被调用
+   flush（ChannelHandlerContext） 当请求通过channel将入队数据冲刷到远程节点时被调用
+  。。。
+  详情见 6-4
+  
+  channelPromise 与 ChannelFutrue channelOutboundHandler 中的大部分方法都需要一个channelPromise参数，以便在操作完成时得到通知。
+  channelpromise是channelFutrue的一个子类，其定义了一些可写的方法，如setSuccess（）和setFailure，从而使channelFutrue不可变。
+  
+  6.1.5 channelHandler 适配器
+  netty 提供了两个适配器，是channelInboundHandlerAdapter 和 channelHandlerOutboundAdapter ，两个适配器重写了channelHandler的部分方法，
+  可以快速的建立起对应的channelHandler的event方法。具体层次结构见6-2
+  
+  6.1.6 资源管理
+  netty 在channelRead和channelWrite方法处理中，进行的内存监控，当你没有通过release方法释放ByteBuf对象时，netty会产生具体的日志消息提醒。
+  netty目前提供了4种检测级别，如6-5所示
+  
+  如果netty在责任链上想要丢弃消息，并不接受，那么需要通过referenceCountUtil.release() 释放资源，并且在write方法中使用promise.setSuccess通知
+  ChannelFutrueListener。read则不需要通知，直接释放就可以了。
+  
+  
+  
   
   
 	
 记录问题：
 1 如何通过channelhandlerContext ctx 写出数据到服务端，而服务端又怎么将数据写出到客户端。
 2 写出数据是否可以使用channel或者ctx写出？还是只能用其中一个？
+
+
+思考的问题
+ cookie 记录了session的key值，如果返回到浏览器中，通过复制cookie释放可以复制整个会话的状态？
+ 如果不会是怎么保证安全性的？
+ 
 	
  
 	
 	
 	
 	重点： 
-	需要学习mybatis的逆向工程，回头写一个通过json自动生成实体类。
