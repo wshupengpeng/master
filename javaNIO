@@ -1,0 +1,51 @@
+javaNIO:
+1 buffer：
+ mark： 标记位，用来标记当前position位置
+ position： 读取位，用来标记当前读取的位置
+ limit：限制位，用来标记当前限制读取的位置
+ capacity: 容量，表示缓冲区最大容量。
+ 
+ mark<=position<=limit<=capacity
+ 
+ 几个重要方法：
+	1 flip ： 翻转缓冲区,重新读取缓冲区，具体操作：limit=position;position=0;mark=-1; 
+	2 rewind： 重读缓冲区，具体操作： position=0;mark=-1;
+	3 reset: position=mark; 如果mark位是默认-1则报错
+	4 compact: 缓存未读取数据，具体操作System.copy(buffer,position,buffer,0,limit-position);       
+		position(remaining());
+        limit(capacity());
+        discardMark();
+		在此操作后重读需要使用flip即可读取未读取的数据。
+	5 wrap 传入新的数组，用来做缓冲区的备份存储器。
+	（1）char [] myArray = new char [100]; CharBuffer charbuffer = CharBuffer.wrap (myArray); 
+	（2）CharBuffer charbuffer = CharBuffer.wrap (myArray, 12, 42); 
+	6 hasArray()
+	判断此缓冲区是否有备份数组，如果有则可以调用array()返回缓冲区对象所使用的数组存储空间的引用
+
+byteOrder：
+ 多字节数值被存储在内存中的方式一般被称为 endian-ness（字节顺序）。如果数字数 值的最高字节——big end（大端），位于低位地址，那么系统就是大端字节顺序（如图 214所示）。
+ 如果最低字节最先保存在内存中，那么小端字节顺序（如图2-15所示）。 字节顺序很少由软件设计者决定；它通常取决于硬件设计。字节顺序的两种类型有时被称 为字节性别，在当今被广泛使用。
+ 两种方式都具有自身的优势。Intel 处理器使用小端字节 顺序涉及。摩托罗拉的CPU 系列、SUN 的Sparc 工作站，以及 PowerPC的 CPU 架构都采用 大端字节顺序。 字节顺序的问题甚至胜过CPU硬件设计。
+ 当Internet的设计者为互联各种类型的计算机 而设计网际协议（IP）时，他们意识到了在具有不同内部字节顺序的系统间传递数值数据的 问题。因此，IP协议规定了使用大端的网络字节顺序概念 
+ 4。所有在IP分组报文的协议部分 中使用的多字节数值必须先在本地主机字节顺序和通用的网络字节顺序之间进行转换。 
+ 
+ 2 channel:
+ 通道可以以阻塞（blocking）或非阻塞（nonblocking）模式运行。非阻塞模式的通道永远不会 让调用的线程休眠。请求的操作要么立即完成，
+ 要么返回一个结果表明未进行任何操作。只有面向 流的（stream-oriented）的通道，如 sockets 和 pipes 才能使用非阻塞模式。 
+ 
+  DirectByteBuffer 和 HeadByteBuffer 区别：
+ 在于DirectByteBuffer是直接缓冲区，属于JVM堆外的缓冲区，C或C++数组，可以跟操作系统直接进行IO操作，
+ HeadByteBuffer 底层操作时则需要转换为DirectByteBuffer才行，底层需要多发生一次IO
+
+
+MapByteBuffer: 内存映射缓冲区，将磁盘文件数据映射到内存上，底层操作更快。 
+1 Read_WRITER模式： 在此模式下，写操作会共享到所有缓冲区上，但是当private模式下已经修改某个region下，则此修改不生效。
+2 Read_Only 模式：此模式下，在read_writer 和channel 上写操作可见。
+3 private 模式：所有修改操作对其他缓冲区不可见，所有private共享一个缓冲区，修改可见，但是当修改相同region时不生效。
+4 channel写： channel修改后对上述3中模式均可见，但是在private下，相同region不生效。
+
+何为修改相同region：假设线程1在相同文件通道创建了MapByteBuffer，设置模式为私有的，如果在position 0~10上修改，线程2也进行相同 0~10上修改，则线程1上可见内容不会随着线程2的修改而改变，可以认为region锁。
+ 
+ 
+ 
+ 
