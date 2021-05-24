@@ -1,0 +1,188 @@
+前几天，HAE又双叒叕被报二级事件了，好基友们从世界各地纷纷发来贺电，哈哈高息服你又上光荣榜了
+虽然每次的事件都事出有因，但这次可谓是负屈含冤
+
+此次事件中，HAE网关出现了异常，HAE网关负责服务调用的透传和分发
+当时某个通过HAE网关被调用的业务服务出现了异常，响应极慢，导致对该服务的调用线程在网关堆积，最终耗尽了网关所有可用线程
+HAE网关收到异常告警之后迅速通过扩容恢复了网关自身的可用性
+但因为真正出现异常的业务服务迟迟未能恢复，故障恢复时间较长，最后还是按二级事件来定级
+从事后的问题根因分析来看，业务服务出现异常的原因是其使用的Redis突然出现了异常，导致服务器的可用线程迅速耗尽
+大量调用线程在业务服务器堆积，出现响应超时。对于HAE网关而言，可谓是城门失火，殃及池鱼
+唉，以前做业务应用的时候，从来没有想到原来公共产品是这么复杂，还以为自己做的好就行了
+现在看来作为公共产品，单是自己做的好是不够的
+
+
+
+在这里并不去讨论谁对谁错，领导才需要关心事件责任的归属，有钱有闲的人更喜欢刨根问底
+相传Redis异常直接引发生产环境的事故，已经不是一两次了
+作为缓存组件，当Redis不可用时，照说查询请求应该迅速打到数据库，怎么也会苟延残喘一段时间，但事实上并非如此
+
+花什么时候开是有季节的，系统什么时候会出问题却没有人知道
+在很久很久以前，我曾有幸得到星爷·陈的友情支持，在使用Redis缓存过程中注入Redis不可用故障来定位分析过此类问题
+我们使用生产环境流量放大重放的方式对HAE公共服务作了全链路压测（db做了读写分离，4个读库，生产高峰QPS在1k左右），从压测结果来看
+1、如果使用Redis，QPS能达到1w以上
+2、如果在压测前直接关闭Redis缓存配置，不使用Redis，QPS也能达到9k，数据库负载较低
+3、但在使用Redis缓存过程中，QPS为4k左右时注入Redis不可用故障，应用线程池立刻飙满导致不可用，而数据库却基本没有负载
+
+
+
+
+从调用链路来分析，如果不做任何设计直接使用"最朴素"的Redis调用场景，当Redis出现异常时，所有的请求很可能都会卡在步骤1
+
+上网研究了一下Jedis客户端的用户手册，Jedis连接池有两个参数blockWhenExhausted和maxWaitMillis，官方描述是这样的：
+blockWhenExhausted：当资源池内连接用尽后，调用者是否要等待。只有当值为true时，maxWaitMillis才会生效 。默认值为true
+maxWaitMillis：当资源池内连接用尽后，调用者的最大等待时间（单位为毫秒）。默认为-1（表示永不超时）
+按我们IT近几年的尿性，不会有多少产品会主动考虑质量属性方面的调优，直接使用默认参数了事
+那么Redis一旦出现故障，所有调用都会排队等待拿可用连接。因为默认设置是永不超时，这一等就是海枯石烂
+新机子哇 一自摸黑刀子
+这也就解释了为什么当我们在使用Redis缓存过程中注入不可用故障，应用线程池立刻飙满，而数据库却基本没有负载的现象
+
+那这个问题是否可以通过参数调优来解决呢？
+理想很丰满，现实很骨感
+如果想规避Redis不可用故障造成的影响：
+a. 得把blockWhenExhausted设置成false，当资源池的可用线程耗尽后，让调用者不等待
+b. 得把maxWaitMillis设置为一个极小值，以减少调用者的等待时间
+但无论哪种方案势必会影响到正常业务场景下使用Redis缓存
+不等待肯定是不可能的，无论是网络抖动，或者缓存对象中夹杂了个别大对象（导致对该对象查询慢），都可能造成短暂的等待
+就好比高速路上单条车道上的事故，可能会短时间内造成拥堵，但是并不会造成彻底的交通停滞，直接不让等就是因噎废食了
+而把maxWaitMillis设置为极小值以减少调用者的等待时间同样无法解决问题，在QPS极高的场景下哪怕再小的等待值都是致命的
+就好比深圳开车去广州，正常情况下大家都会走高速。但有一天高速路段彻底歇菜了，后面的车辆并不知道前面已经堵死了，还在排队等候
+哪怕这个排队等待的时间再短，只要量大，同样会造成拥堵
+成人的世界里没有容易二字，看来还是要从设计上优化才能根治
+
+我们在使用Jedis客户端连接Redis的时候，会用到Jedis连接池
+连接池的概念对开发人员来说并不陌生，就是连接使用完了并不要直接释放，而是放在池子里面keep alive
+一次完整的调用请求过程是这样的：
+1、调用方通过TCP协议的三次握手和被调用方建立连接
+2、发送调用凭据做调用身份验证，验证通过后返回通过结果
+3、调用方发送业务执行请求，被调用方收到请求后执行业务逻辑，返回结果
+4、调用方通知被调用方需要关闭连接，通过TCP四次挥手最后完成关闭
+由此可见创建连接是一个非常耗时耗力的事情
+通过连接池，当我们需要使用到连接的时候，只需去连接池中取出一条空闲的连接，而不是新建一条连接
+这样我们就可以大大减少创建和释放连接的开销，从而提高了应用程序的性能
+
+针对连接会去从连接池获取，而且池子都是单例的特性，优化思路如下：
+1、将maxWaitMillis设置为2s超时，确保Redis调用超时时会抛出异常
+2、在代码逻辑中，在单位时间内捕获到的超时异常超过阈值时
+    2.1 将是否使用Redis开关设置为false，保证新进入的请求走到数据库层
+    2.2 将Redis连接池直接销毁
+    2.3 启动Redis监控进程，每5分钟尝试重连Redis，发现Redis恢复就重新将Redis开关设置为true
+3、在连接池初始化的逻辑中加多一次是否使用Redis开关的判断，假如初始化return false，查询也不会继续走Redis，而是直接走数据库
+在QPS极高的场景下Redis出现故障，短时间内也会有大量的请求在排队等待拿可用连接，这时需要有一个有效的机制通知大家别等啦
+销毁Redis连接池好比把"高速路"直接炸掉，让大家去改走国道
+
+
+按此思路优化代码后，实际压测效果如下
+
+
+10:30启动压测，此时Redis缓存尚未建立，查询要走数据库，应用服务器和数据库的CPU开始攀升
+10:42左右，应用服务器和数据库的CPU开始回落，说明Redis缓存已经逐步建立，查询不再走数据库
+10:52左右，注入Redis不可用故障，应用服务器和数据库的CPU又开始攀升，说明查询请求又落到了数据库上
+11:22左右，恢复Redis，应用服务器和数据库的CPU再次逐步回落，说明查询请求又自动成功切回到了Redis
+整个压测过程中，服务调用一直保持正常，应用日志无明显异常
+
+该方案曾经发给相关专家审视，也许专家们实在太忙，也许专家们认为过度设计，最后石沉大海
+我们在自己的产品上加上了这个保险栓，可惜一直也没有等到机会来证明
+直至今日兄弟产品的中招，终于有机会重见天日了，果然是一张卫生纸，一条内裤都有它本身的用处
+
+无论年龄几许都能想到好主意，但得有经验，才能将好主意转变为成功
+我听人讲过，任何东西都会过期的。或许只有经验，保质期可以稍稍长一点
+希望某天当我离开之后，还能留下些经验能为别人制造回忆
+
+
+
+
+
+
+
+
+2、在代码逻辑中，在单位时间内捕获到的超时异常超过阈值时
+    2.1 将是否使用Redis开关设置为false，保证新进入的请求走到数据库层
+    2.2 将Redis连接池直接销毁
+    2.3 启动Redis监控进程，每5分钟尝试重连Redis，发现Redis恢复就重新将Redis开关设置为true
+	
+
+
+	// redis失败限流统计 默认每秒十次
+	private static RateLimiter rateLimiter = RateLimiter.create(10);
+	// redis是否开启开关
+    private static volatile boolean redisEnableSwitch = true;
+	 // redis是否配置开关
+    private static boolean redisConfigSwitch = true;
+	
+	//2.1 获取数据,先从redis获取,没有在从DB取
+	public Object getPermissData(Map boMap){
+        String key=getCacheKey(boMap);
+        Object data=fromCache(key);
+        if(data==null){
+            data=fromDb(boMap);
+            putCache(key,data);
+        }
+        return data;
+    }
+	
+	public Object fromCache(String key) {
+        Object result = null;
+        if (!redisEnableSwitch) {
+            return result;
+        }
+        try {
+            result = cacheClient.get(key);
+        } catch (Throwable e) {
+            redisFailureCount();
+            LOGGER.error("The cache get failed: ", e);
+        }
+        return result;
+    }
+	
+	// 从redis获取缓存数据失败限流开关 10QPS
+	private void redisFailureCount() {
+		if (!rateLimiter.tryAcquire()) {
+			redisEnableSwitch = false;
+			cacheClient = null;
+			LOGGER.info("The number of failures in seconds reaches " + rateLimiter.getRate()
+				+ ", and redis starts to close, and try again in 5 minutes! redisEnableSwitch:"
+				+ redisEnableSwitch);
+			
+		}
+    }
+	
+	
+	//2.3 redis守护任务 
+    private static ScheduledExecutorService redisGuardianTask = Executors.newSingleThreadScheduledExecutor();
+	static {
+        // 守护reids开关
+        if (redisConfigSwitch) {
+            redisGuardianTask.scheduleAtFixedRate(() -> {
+                if (LOGGER.isInfoEnabled()) {
+                    LOGGER.info("Check if the redis switch is available, redisEnableSwitch:" + redisEnableSwitch);
+                }
+                if (!redisEnableSwitch) {
+                    // 先尝试链接redis，可用才开启开关
+                    if (getRedisCacheInstance() != null) {
+                        redisEnableSwitch = true;
+                        LOGGER.info("Redis reconnected successfully!");
+                    }
+                }
+            }, 0L, 300000L, TimeUnit.MILLISECONDS);
+        }
+    }
+	
+	// 初始化redis
+	  private ICacheOpsClient getRedisCacheInstance() {
+        if (cacheClient == null) {
+            synchronized (objectLock) {
+                try {
+                    if (cacheClient == null) {
+                        cacheClient = CacheClient.getCacheOperationsClient();
+                        cacheClient.put("====redis test data=====","test");
+                        LOGGER.info("The redis cache init sucessful!");
+                    }
+                } catch (RuntimeException e) {
+                    redisEnableSwitch = false;
+                    cacheClient = null;
+                    LOGGER.error("failed to initialize redis cache:", e);
+                }
+            }
+        }
+        return cacheClient;
+    }
