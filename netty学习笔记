@@ -261,7 +261,187 @@ netty学习笔记:
   如果netty在责任链上想要丢弃消息，并不接受，那么需要通过referenceCountUtil.release() 释放资源，并且在write方法中使用promise.setSuccess通知
   ChannelFutrueListener。read则不需要通知，直接释放就可以了。
   
+  6.2 channelpipeline 接口
+  channelpipeline是一个连接流经过channel的入站和出站时间的channelHandler实例链，每一个新创建的channel都会被分配到一个新的
+  channelpipeline，这项关联是永久性的，channel既不能附加另外一个channelpipeline，也不能分离当前的。
+  channelpipeline：
+  1 channelpipeline 保存了与channel相关联的channelHandler
+  2 channelpipeline 可以根据需要，通过添加或者删除channelHandler来动态地修改
+  3 channelpipeline有着丰富的API用以被调用，以相应入站和出站事件
   
+  6.3 channelHandlerContext 接口
+  channelHandlerContext 代表了channelHandler 和 channelPipeline之间的关联，每当有channelHandler添加到channelPipeline中，都会
+  创建channelHandlercontext。channelHandlerContext的主要功能是管理它所关联的channelHandler和在同一个channelPipeline中的其他channel
+  Handler之间的交互。
+  channelHandlerContext:
+  1 channelHandlerContext 和 ChannelHandler之间的关联(绑定)是永远不会改变的，所以缓存对它的引用是安全的
+  2 如同我们开头所解释的一样，对于其他类的同名方法，channelhandlercontext的方法将产生更短的事件流，应该尽可能的利用这个特性
+  来获取最大的性能。
+  6.3.1 使用channelHandlerContext 
+  当channelHandler 添加到channelpipeline时，channelHandlerContext会被创建，如果使用channel.write操作，会倒是写入事件从尾端到头
+  部地流经channelPipeline。
+  通过channelpipeline.write 其方式与上述一样。
+  channelHandlerContext.write 则会调用当前channelHandler下一个channelHandler的处理方法,减少了事件的流通。
+  6.3.2 channelHandler 和channelHandlerContext 的高级用法
+  1 可以通过channelHandler 添加到channelpipeline中实现动态的协议切换
+  2 缓存channelContextHandler 进行后续使用
+  3 对于channelHandler而言可以共享给多个channelPipeline使用，如果这样的话，需要使用@Shared来标记
+  为什么要共享一个channelHandler实例，共享一个可以跨越多个channel收集信息。
+  6.4 异常处理
+  6.4.1 处理入站异常
+  1 channelHandler.exceptionCaught的默认实现方法是简单地将当前异常转发给Channelpipeline中的下一个channelHandler
+  2 如果异常到达了channelPipeline的尾端，它将会被记录为未被处理
+  3 如果想要定义自定义的处理逻辑，需要从写exceptionCaught方法，然后你需要决定是否需要将该异常传播出去。
+  6.4.2 处理出站异常
+  1 对于出站异常而言均是通过channelfutrue，注册到channelfutrue的channelListener将操作完成时被通知该操作时成功了还是出错了。
+  2 几乎所有的channeloutputboundChannelHandler上的方法都会传入一个channelPromise的实例，作为channelFutrue的子类，channelPromise
+  也可以被分配用于异步通知的监听器。但是，channelPromise也可以被分配用于异步通知的监听器，但是，channelpromise还具有提供立即通知
+  的可写方法：
+  channelPromise setSuccess();
+  channelPromise setFail(Throwable cause);
+  添加channelFutrueListener 两种方式：
+  1 是通过channelHandlerContext.write()方法,获取channelFutrue对象，通过addListener加上监听逻辑
+  2 是通过channelFutrueListener添加到即将作为参数传递给channelOutboundHandler的方法的channelPromise。
+  
+  第七章 eventLoop 和线程模型
+  7.1 线程模型概述
+  基本线程池化模式可以描述为：
+  1 从池的空闲线程列表中选择一个Thread，并且指派它去运行一个已提交的任务（一个Runnable的实现）;
+  2 当任务完成时，将该Thread返回给该列表，使其可被重用。
+  优势：效率高，消耗小。
+  劣势：无法消除由上下文切换带来的开销
+  
+  7.2 eventLoop 接口
+	eventLoop是通过java两个基本API，并发和网络编程。
+	事件/任务的执行顺序 事件和任务是以FIFO的顺序执行的，这样可以通过保证字节内容总是按正确的顺序被处理，消除潜在的数据损坏的
+	可能性。
+  7.2.1  netty4 中的I/O和事件处理
+   由I/O操作触发的事件将流经安装了一个或者多个channelHandler的channelPipeline。传播这些事件的方法调用可以随后被channelHandler
+   所拦截，并且可以按需地处理事件。在netty4中，所有的I/O操作和事件都已由已经分配给了EventLoop的那个Thread来处理。
+  7.2.2 netty3 中的I/O操作
+   不太明白，具体说了netty3和netty4在出站线程调度的不同，netty3是通过调用线程处理，出现的问题是导致相同channel下，多个线程同时
+触发事件，导致线程安全问题。而netty4则是通过eventLoop线程去处理出站事件，保证多线程下的相同事件被一个Thread处理。第二个缺点是
+当出站事件触发入站事件时，比如channel.write方法导致异常，而会触发入站事件exceptionCaught,在netty3的线程模型中，这个是入站事件
+需要调用线程自己处理，然后将事件移交给I/O线程取执行，导致额外的上下文切换。netty4的解决方法与上个一致，通过同一个线程处理
+eventLoop 所产生的所有事件，没有上下文切换，一个线程也避免了同一个channel下多个线程调用write，触发相同事件
+  7.3 任务调度
+  如何使用netty的API检测心跳机制，并合理的关闭channel。
+  7.3.1 JDK的任务调度API
+	在java5之前，任务调度是建立在java.util.Timer 类之上的，其使用了一个后台Thread，并且具有与标准线程相同的限制，随后，JDK提供了
+	java.util.concurrent包，定义了线程池。可以通过阻塞延迟线程池来完成这个目标。
+  7.3.2 使用eventLoop 调度任务
+   ScheduledExecutorService 的实现具有局限性，事实上作为线程池管理的一部分，将会有额外的线程被创建，如果有大量任务被紧凑地调度
+   那么这将成为一个瓶颈，而netty的eventLoop实现的任务调度解决了这一问题。netty的eventLoop扩展了ScheduledExecutorService，提供了
+   JDK实现所有的可用方法，如果想要取消任务，可以通过ScheduleFutrue.cancel(false)
+   7.4 实现细节
+   7.4.1 线程管理 不太理解
+   eventLoop会对于当前分配的channel而言，会负责处理当前channel的整个生命周期内的所有事件。
+   如果当前调用线程是支撑EventLoop的线程，那么所提交的代码块会被直接执行，否则，会被添加到内部队列，等待事件触发后再执行。
+   tips：注意如果一个任务执行事件非常长，建议不要放到eventLoop中，会阻塞其他任务的执行，应该通过pipeline添加新的eventLoopGroup
+   来完成这个任务。
+   7.4.2 EventLoop的线程分配
+    1 异步传输：一个eventLoopGroup 分配多个eventLoop，每一个eventLoop由一个线程处理多个channel。因此不同channel共享同一个ThreadLocal
+	变量，因此对于实现状态追踪是一个糟糕的选择，而共享一些重度的或者代价昂贵的对象或者是事件。
+	2 阻塞传输：用于像OIO旧的阻塞I/O，这样的其他传输的设计略有不同
+	这里每一个channel都将分配给一个eventLoop，而一个因此eventLoop与channel为1对1的形式。
+	
+	
+	第八章 引导
+	8.1 bootstrap 类 
+	1 bootstrap ： 只需要创建一个单独的、没有子channel的channel用于所有的网络交互。
+	2 serverbootstrap ： 服务器致力于用一个父channel来接收来自客户端的连接，并创建子channel用于它们之间的通信。
+	为什么引导类是cloneable？
+	你有时可能会创建多个具有类似配置或者完全相同配置的channel。为了支持这种模式而又不需要为每个channel都创建一个引导类实例，
+	AbstractBootStrap被标记为了Cloneable。
+	
+	8.2 引导客户端和无连接协议
+	1 group（EventLoopGroup）  设置用于处理Channel所有事件的eventLoopGroup
+	2 channel（Class <？ extends C>）   			  channel()方法指定了channel的实现类。如果该实现类没提供默认的构造方法，可以
+	  channelFactory（channelFactory<？extends C>）   通过调用channelFactory()方法来指定一个工厂类，它将会被bind()方法调用。
+	3 localAddress（SocketAddress）  指定channel应该绑定到本地地址。如果没有指定，则将由操作系统创建一个随机的地址，挥着可以通过
+									 bind()或者connect()方法指定localAddress
+	4 option(ChannelOption<T> option,T value) 设置channelOption，其将被应用于每个新创建的channel的channelConfig。这些选项将会通
+											  过bind()或者connect()方法设置到Channel，不管哪个先被调用。这个方法在channel已经被
+											  创建后再调用将不会有任何的效果。支持channelOption取决于使用的channel类型，
+	5 attr(Attribute<T> key,T value) 指定新创建的channel的属性值，这些属性值是通过bind()或者connect()方法设置到Channel的，具体
+									  取决于谁最先被调用，这个方法在channel被创建后将不会有任何的效果。
+    6 BootStraphandler(channelHandler) 设置将被添加到channelPipeline以接收事件通知的channelHandler
+    7 clone()   					   创建一个当前的bootstrap的克隆，其具有和原始的Bootstrap相同的设置信息。
+	8 remoteAddress（SocketAddress） 设置远程地址，或者，也可以通过connect()方法来指定它
+	9 ChannelFutrue connect()        连接到远程节点并返回一个ChannelFutrue,其将会在连接操作完成后接收到通知。
+	10 channelFutrue bind() 		 绑定channel并返回一个channelFutrue，其将会在绑定操作完成后收到通知，在那之后必须调用
+									channel.connect()方法来建立连接。
+	8.2.1 引导客户端
+	详情见8.2图，具体是写了一段bootStrap的引导代码
+	8.2.2 Channel和 EventLoopGroup 的兼容性
+	channel
+	 ---- nio
+				NioEventLoopGroup
+	 ---- oio
+				OioEventLoopGroup
+	 ---- socket 
+	      -----NIO 
+					NioDatagramChannel
+					NioServerSocketChannel
+					NioSocketChannel
+		  -----OIO
+					OioDatagramChannel
+					OioServerSocketChannel
+					OioSocketChannel
+	
+	在此情况下,对应EvnetLoopGroup不能混用
+	NIOEventLoopGroup-》socket（NIO）
+	OIOEventLoopGroup-》socket(OIO)
+	关于IllegalStateException:
+	在引导过程中，在调用bind()或者connect()方法之前，必须调用一下方法设置所需组件
+	1 group()
+	2 channel或者channelFactory
+	3 handler
+  8.3引导服务器
+  略
+  8.4 从channel引导客户端
+  对于服务端而言，处理数据要注意的是，需要服务eventLoop，减少线程上下文的切换和创建线程不必要的开支。
+  具体代码看  8-5
+  8.5 在引导过程中添加多个channelHandler
+  在之前的代码中，我们添加channelHandler都是添加一个，如果需要添加多个channelHandler需要使用ChannnelInitializer
+  此方法可以获取对应的channel并能拿到channelPipeline，从而可以使用链式编程将channelHandler添加进去。
+  具体引导方法见 8-6
+  8.6 使用netty的channelOption和属性
+  channelOption可以通过参数配置netty的参数，也可以通过attr方法设置在netty的生命周期之外使用channel的属性和值。
+  具体请看8-7
+  8.7 引导DatagramChannel 
+  OioEventLoop-》OioDatagramChannel-》DatagramPacket
+  具体代码请见8-8
+  8.8 关闭
+  关闭时需关闭eventloopgroup ，它将处理任何挂起的事件和任务，并且随后释放所有活动的线程，这就是调用shutdownGracefully（）方法的
+  作用，需要知道的是，这个方法也是一个异步操作，因此你需要通过sync（）阻塞直到方法调用结束或者向channelFutrue上注册监听获取结束
+  后的通知，或者你也可以在EventLoopgroup调用此方法前，通过channel.close关闭通道,但是请记得关闭EventLoopgroup本身。
+  
+  第九章 单元测试
+  略
+  
+  第十章 编解码框架
+  对于网络编程而言，在网络中传递的是二进制字节，因此在处理数据的时候要根据不同的协议，通过不同的编解码器，来进行对应的操作。
+  10.1 什么是编解码器
+  编解码器可以看做是一个数据格式的相互转换，这种转换逻辑由编解码器处理，编解码器由编码器和解码器组成，它们每种都可以将字节流从
+  一种格式转换为另一种格式。
+ 编码器处理出站数据，解码器处理入站数据
+ 10.2 解码器
+ 1 将字节码转换为消息-----ByteToMessageDecoder 和ReplayingDecoder
+ 2 将消息类型解码为另外一种---- MessageToMessageDecoder
+ 10.2.1 抽象类ByteMessageDecoder
+ 很重要：
+ netty提供了一个抽象的基类：ByteToMessageDecoder，由于你不可能知道远程节点是否会一次性地发送一个完整的消息，所以这个类会对入站数据
+ 进行缓冲，直到它准备好处理。（那么就可以解决下面6的问题了）
+ decode (ChannelHandlerContext ctx,ByteBuf in , List<Object> out)  这是你需要实现的唯一抽象方法，decode()方法被调用时将会传入一个包含了传入数据的ByteBuf，以及一个用来
+																   添加解码消息的List。对这个方法的调用将会重复进行，直到确定没有新的元素添加到该List，或者该ByteBuf中
+																   没有更多可读取的字节时为止。然后，如果该List不会空。那么它的内容将会被传递给ChannelPipeline中的下一
+																   个ChannelInboudHandler。
+ decodeLast(ChannelHandlerContext ctx,ByteBuf in , List<Object> out) Netty提供的这个默认实现只是简单地调用了decode方法().当Channel地状态变为非活动时，这个方法将会被调用
+																	一次。可以重写该方法以提供特殊地处理。
+																	
+ 10.2.2 抽象类 ReplayingDecoder ，此类扩展了byteToMessageDecoder类，使得我们不必调用readableBytes()方法，它通过使用一个自定义的ByteBuf实现，replayingDecoderByteBuf，包装
+ 传入的ByteBuf实现这一点，将其在内部执行该调用。
   
   
   
@@ -269,6 +449,33 @@ netty学习笔记:
 记录问题：
 1 如何通过channelhandlerContext ctx 写出数据到服务端，而服务端又怎么将数据写出到客户端。
 2 写出数据是否可以使用channel或者ctx写出？还是只能用其中一个？
+3 channelpipeline 的 channelHandler 顺序问题 ，如何解决顺序链处理问题？
+ outputbound必须在inputbound之前，不然数据的读取和写出有误。
+ 原因： 因为使用了channelContextHandler.write方法，这个方法是触发当前channelHandler的下一个channelhandler来处理相应事件，
+ 而出站事件是通过tail->prev 因此如果在inputbound中调用write方法，其本身会取找prev节点，而outputbound是在next节点，因此outputbound
+ 不会触发。
+解答: 通过channelHandlerContext使用writeandFlush操作，会通过当前channelHandler，向上回溯，会触发outputboundchannelHandler的write操作，如果在当前
+inputboundchannelHandler之前的链上没有outputChannelHandler则不会触发任何操作，之后的有output是不会触发的。因此在新增channelHandler
+而通过channel或者channelpipeline不会出现这个问题。
+tips：通过channelHandlerContext的write和writeFlush操作的操作链时通过tail到prev。如果责任链顺序不同，可能导致outputbound事件不会
+触发。
+添加channelHandler时，要注意顺序。
+
+4 server 端需要在read结束后就关闭通道 否则通道就会一直循环读取和发送
+
+5 如何通过channelHandlerContext.write（）.addListener() 去触发异常问题？？
+需要通过在outputbound上的write方法中添加异常，此时，已经注册监听的channelFutrue会触发异常代码。
+
+6 对于netty而言，如何区分文件或者字符串，虽然可以通过约定部分字节传递文件类型和长度，但是怎么保证一个byteBuf下可以获取整个传输
+的值，如果是分段传递，第一段传递的类型和长度就如何共享给整个channel，对于断点续传的情况如何保证？
+
+7 delayExecutor怎么实现的？
+对于延时线程而言，主要的方式是通过延时队列实现的，而延时队列则是依赖优先级队列完成的，在延时队列中，当用get方法时，会通过优先级队列
+判断当前的first节点是否到期，因为使用的是优先级队列，可以重写compareTo方法，因此头节点是过期时间最早的，当头节点未过期，当前方法
+会阻塞，并且会将其他线程等待，将leader线程设置为当前线程（防止其他线程同时唤醒争抢）。
+
+
+8 学习spring 定时任务框架 ，理清楚quartz和schedule的区别
 
 
 思考的问题
