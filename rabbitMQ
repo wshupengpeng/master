@@ -1,0 +1,44 @@
+rabbitMQ:
+	1 ttl队列： 延时队列，可以进行设置队列的延时时间，也可以设置消息的延时时间。
+	2 死信队列 ： 通过设置队列的死信交换机来设置的队列，通过绑定死信交换机和队列来完成死信队列。
+	产生死信的几种情况： 1 消息被拒绝
+						 2 消息过期
+						 3 队列到达最大长度
+	3 ack确认机制: 1 confirmCallback 确认消息到交换机进行回调
+				   2 returnCallback 确认消息到达队列进行回调
+	  消息确认模式： AcknowledgeMode.NONE：自动确认
+					 AcknowledgeMode.AUTO：根据情况确认
+					 AcknowledgeMode.MANUAL：手动确认  
+	  
+					 
+	4 事务管理机制
+	5 消息堆积: 
+	 分析问题：先看是否是不同机器性能导致消费数据的情况不一致，在此可以通过qos设置消费者的堆积数据，通过设置堆积数据来分配数据，
+	 如果不是，则分析消费的数据是因为什么导致堆积的，如果是交互数据库导致的问题，而且数据库不要求顺序性，则可以启动异步线程来操作。
+	 如果是IO导致过慢，则可以新建队列，此队列将需要IO的消息统一批量处理。（具体问题具体分析）
+	6 消息丢失：
+	  消息丢失分为3部分：
+			1 如何保证生产端的消息不丢失：
+				rabbitmq通过开启confirm模式，每当消息发送到broker时，需要接到server端的ack确认，在此基础上可以配置
+				ConfirmListener来监听broker端是否发回ack确认，确认成功则回调handleAck，失败则回调handleNack。
+				ReturnListener则可以监听是否可以将消息投送到正确的queue中，如果不能则回调handleReturn方法。（此时需要配置mandatory=true
+				，否则路由失败不回调，可以在此方法中回调重发数据）
+				(集成springboot:rabbitTemplate中也有这两者的接口，confirmCallback和returnCallback，如果要具体配置监听器，
+				则需要使用simpleMessageListenerContainer设置对应监听回调,simpleMessageListenerContainer功能非常强大，在此不多说了
+				自己查资料。)
+				1.1 confirm模式可以通过两种方式提高生产效率，
+				1 是通过批量发送批量确认的方式
+				2 是通过异步操作，自身维护一个sortSet，通过回调hanlerAck获取对应的tag，通过tag手动删除多余的元素，如果确认失败则
+				到达Nack，记录tag标签。
+				通过两个不同的回调函数可以保证消费端到broker端的数据不丢失。（丢失就回调重发）
+			2 如何保证消费端的消息不丢失：
+				1 channel可以开启ACK手动确认模式，在basicConsume上有多个重载方法，可以设置autoAck为false，此时则开启手动确认模式（spring
+				模式下，配置setAcknowledgeMode为MANUAL，则改为手动确认模式）,此时，消费者消费消息后，需要手动调用channel.basicAck才可以
+				确认消息，如果不确认则可以通过channel.basicNAck拒绝确认或者channel.basicReject拒绝。（目前basicNAck和reject区别在于
+				一个是支持批量，一个仅支持单个。都是通过requeue参数来确认是否抛弃数据。）
+				2 通过事务支持channel.txselect()开启后需要手动commit才可以告知broker消费成功，否则回退。
+				
+	7 有序消费
+		配置唯一sequence，保证消费顺序。
+	8 重复消费
+		通过redis保证唯一键，用一个列表维护。
