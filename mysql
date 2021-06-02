@@ -1,0 +1,517 @@
+
+文档
+社区
+专家
+博客
+外部资源
+主题
+知道
+99+
+胡鹏鹏
+胡鹏鹏
+EN
+请输入关键词搜索
+当前位置：首页>叶刚锋的空间>叶刚锋的博客>mysql锁知识及死锁问题解决方法
+mysql锁知识及死锁问题解决方法
+日期：2018-07-12 22:26浏览：192评论：0
+1      前言
+在现网运行环境中发生一些死锁，锁等待等问题，每次出现都要花费大量精力去了解相关锁知识，再调查问题，本文主要介绍mysql一些锁的基本知识，及相应的排查解决方法。若有写的不对的地方，尽请告知。
+
+前提：
+
+mysql版本：5.6.29
+
+引擎：InnoDB
+
+事务级别：REPEATABLE-READ
+
+ 
+
+2      背景（重要）
+MySQL/InnoDB的加锁分析，一直是一个比较困难的话题。我在工作过程中，经常会有同事咨询这方面的问题。同时，微博上也经常会收到MySQL锁相关的私信，让我帮助解决一些死锁的问题。本文，准备就MySQL/InnoDB的加锁问题，展开较为深入的分析与讨论，主要是介绍一种思路，运用此思路，拿到任何一条SQL语句，都能完整的分析出这条语句会加什么锁？会有什么样的使用风险？甚至是分析线上的一个死锁场景，了解死锁产生的原因。
+
+ 
+
+注：MySQL是一个支持插件式存储引擎的数据库系统。本文下面的所有介绍，都是基于InnoDB存储引擎，其他引擎的表现，会有较大的区别。
+
+2.1      MVCC：Snapshot Read vs Current Read
+MySQL InnoDB存储引擎，实现的是基于多版本的并发控制协议——MVCC (Multi-Version Concurrency Control) (注：与MVCC相对的，是基于锁的并发控制，Lock-Based Concurrency Control)。MVCC最大的好处，相信也是耳熟能详：读不加锁，读写不冲突。在读多写少的OLTP应用中，读写不冲突是非常重要的，极大的增加了系统的并发性能，这也是为什么现阶段，几乎所有的RDBMS，都支持了MVCC。
+
+ 
+
+在MVCC并发控制中，读操作可以分成两类：快照读 (snapshot read)与当前读 (current read)。快照读，读取的是记录的可见版本 (有可能是历史版本)，不用加锁。当前读，读取的是记录的最新版本，并且，当前读返回的记录，都会加上锁，保证其他事务不会再并发修改这条记录。
+
+ 
+
+在一个支持MVCC并发控制的系统中，哪些读操作是快照读？哪些操作又是当前读呢？以MySQL InnoDB为例：
+
+ 
+
+快照读：简单的select操作，属于快照读，不加锁。(当然，也有例外，下面会分析)
+
+select * from table where ?;
+
+当前读：特殊的读操作，插入/更新/删除操作，属于当前读，需要加锁。
+
+select * from table where ? lock in share mode;
+
+select * from table where ? for update;
+
+insert into table values (…);
+
+update table set ? where ?;
+
+delete from table where ?;
+
+所有以上的语句，都属于当前读，读取记录的最新版本。并且，读取之后，还需要保证其他并发事务不能修改当前记录，对读取记录加锁。其中，除了第一条语句，对读取记录加S锁 (共享锁)外，其他的操作，都加的是X锁 (排它锁)。
+
+ 
+
+为什么将 插入/更新/删除 操作，都归为当前读？可以看看下面这个 更新 操作，在数据库中的执行流程：
+
+
+
+update 执行流程
+
+从图中，可以看到，一个Update操作的具体流程。当Update SQL被发给MySQL后，MySQL Server会根据where条件，读取第一条满足条件的记录，然后InnoDB引擎会将第一条记录返回，并加锁 (current read)。待MySQL Server收到这条加锁的记录之后，会再发起一个Update请求，更新这条记录。一条记录操作完成，再读取下一条记录，直至没有满足条件的记录为止。因此，Update操作内部，就包含了一个当前读。同理，Delete操作也一样。Insert操作会稍微有些不同，简单来说，就是Insert操作可能会触发Unique Key的冲突检查，也会进行一个当前读。
+
+ 
+
+注：根据上图的交互，针对一条当前读的SQL语句，InnoDB与MySQL Server的交互，是一条一条进行的，因此，加锁也是一条一条进行的。先对一条满足条件的记录加锁，返回给MySQL Server，做一些DML操作；然后在读取下一条加锁，直至读取完毕。
+
+ 
+
+2.2      Cluster Index：聚簇索引
+InnoDB存储引擎的数据组织方式，是聚簇索引表：完整的记录，存储在主键索引中，通过主键索引，就可以获取记录所有的列。关于聚簇索引表的组织方式，可以参考MySQL的官方文档：Clustered and Secondary Indexes 。本文假设读者对这个，已经有了一定的认识，就不再做具体的介绍。接下来的部分，主键索引/聚簇索引 两个名称，会有一些混用，望读者知晓。
+
+ 
+
+2.3      2PL：Two-Phase Locking
+传统RDBMS加锁的一个原则，就是2PL (二阶段锁)：Two-Phase Locking。相对而言，2PL比较容易理解，说的是锁操作分为两个阶段：加锁阶段与解锁阶段，并且保证加锁阶段与解锁阶段不相交。下面，仍旧以MySQL为例，来简单看看2PL在MySQL中的实现。
+
+
+
+从上图可以看出，2PL就是将加锁/解锁分为两个完全不相交的阶段。加锁阶段：只加锁，不放锁。解锁阶段：只放锁，不加锁。
+
+2.4      Isolation Level
+ 隔离级别：Isolation Level，也是RDBMS的一个关键特性。相信对数据库有所了解的朋友，对于4种隔离级别：Read Uncommited，Read Committed，Repeatable Read，Serializable，都有了深入的认识。本文不打算讨论数据库理论中，是如何定义这4种隔离级别的含义的，而是跟大家介绍一下MySQL/InnoDB是如何定义这4种隔离级别的。
+
+ 
+
+MySQL/InnoDB定义的4种隔离级别：
+
+ 
+
+Read Uncommited
+
+可以读取未提交记录。此隔离级别，不会使用，忽略。
+
+Read Committed (RC)
+
+快照读忽略，本文不考虑。
+
+针对当前读，RC隔离级别保证对读取到的记录加锁 (记录锁)，存在幻读现象。
+
+Repeatable Read (RR)
+
+快照读忽略，本文不考虑。
+
+针对当前读，RR隔离级别保证对读取到的记录加锁 (记录锁)，同时保证对读取的范围加锁，新的满足查询条件的记录不能够插入 (间隙锁)，不存在幻读现象。
+
+Serializable
+
+从MVCC并发控制退化为基于锁的并发控制。不区别快照读与当前读，所有的读操作均为当前读，读加读锁 (S锁)，写加写锁 (X锁)。
+
+Serializable隔离级别下，读写冲突，因此并发度急剧下降，在MySQL/InnoDB下不建议使用。
+
+3      锁介绍
+3.1      锁的类型
+3.1.1        基本锁：共享锁(Shared Locks：S锁)与排他锁(Exclusive Locks：X锁)
+mysql允许拿到S锁的事务读一行，允许拿到X锁的事务更新或删除一行。
+
+加了S锁的记录，允许其他事务再加S锁，不允许其他事务再加X锁；
+
+加了X锁的记录，不允许其他事务再加S锁或者X锁。
+
+ 
+
+mysql对外提供加这两种锁的语法如下：
+
+加S锁：select…lock in share mode
+
+加X锁：select…for update
+
+3.1.2        意向锁（Intention Locks）
+为了支持数据库多粒度级别的锁，mysql引入了意向锁，表明一个事务稍后对表中的行所需的锁定类型（共享或独占）。
+
+意向锁是表级锁，分为意向共享锁(IS锁)和意向排他锁(IX锁)。
+
+An intention shared lock (IS) indicates that a transaction intends to set a shared lock on individual rows in a table.
+
+An intention exclusive lock (IX) indicates that that a transaction intends to set an exclusive lock on individual rows in a table.
+
+For example, SELECT ... LOCK IN SHARE MODE sets an IS lock, and SELECT ... FOR UPDATE sets an IX lock.
+
+加锁协议：
+
+事务请求S锁前，必须先获得对应的IS锁，事务请求X锁前，必须先获得对应的IX锁
+
+锁兼容矩阵：
+
+
+
+ 
+
+下面这段话帮助理解：
+
+innodb的意向锁主要用户多粒度的锁并存的情况。比如事务A要在一个表上加S锁，如果表中的一行已被事务B加了X锁，那么该锁的申请也应被阻塞。如果表中的数据很多，逐行检查锁标志的开销将很大，系统的性能将会受到影响。为了解决这个问题，可以在表级上引入新的锁类型来表示其所属行的加锁情况，这就引出了“意向锁”的概念。举个例子，如果表中记录1亿，事务A把其中有几条记录上了行锁了，这时事务B需要给这个表加表级锁，如果没有意向锁的话，那就要去表中查找这一亿条记录是否上锁了。如果存在意向锁，那么假如事务Ａ在更新一条记录之前，先加意向锁，再加Ｘ锁，事务B先检查该表上是否存在意向锁，存在的意向锁是否与自己准备加的锁冲突，如果有冲突，则等待直到事务Ａ释放，而无须逐条记录去检测。事务Ｂ更新表时，其实无须知道到底哪一行被锁了，它只要知道反正有一行被锁了就行了。
+说白了意向锁的主要作用是处理行锁和表锁之间的矛盾，能够显示“某个事务正在某一行上持有了锁，或者准备去持有锁”
+
+ 
+
+3.1.3        记录锁(Record Locks)
+记录锁, 仅仅锁住索引记录的一行。
+
+单条索引记录上加锁，record lock锁住的永远是索引，而非记录本身，即使该表上没有任何索引，那么innodb会在后台创建一个隐藏的聚集主键索引，那么锁住的就是这个隐藏的聚集主键索引。所以说当一条sql没有走任何索引时，那么将会在每一条聚集索引后面加X锁，这个类似于表锁，但原理上和表锁应该是完全不同的。
+
+ 
+
+3.1.4        间隙锁（Gap Locks）
+间隙锁，是锁定索引记录之间的间隙。
+
+例如，SELECT c1 FROM t WHERE c1 BETWEEN 10 and 20 FOR UPDATE;阻止其他事务将值15插入列t.c1，无论列 中是否已存在任何此类值，因为该范围中所有现有值之间的间隙都已锁定。
+
+间隙锁可以共存，即可以被多个事务同时持有相同的间隙锁，可重入。
+
+间隙锁会阻止其他事务来更新或者插入间隙区间内的记录。
+
+3.1.5        Next-key锁(Next-Key Locks)
+Next-key锁是Record Lock + Gap Lock,锁定了索引行记录加上索引行之前的间隙的记录，这样防止出现幻影行
+
+3.1.6        插入意向锁(Insert Intention Locks)
+    Gap Lock中存在一种插入意向锁（Insert Intention Lock），在insert操作时产生。在多事务同时写入不同数据至同一索引间隙的时候，并不需要等待其他事务完成，不会发生锁等待。
+
+假设有一个记录索引包含键值4和7，不同的事务分别插入5和6，每个事务都会产生一个加在4-7之间的插入意向锁，获取在插入行上的排它锁，但是不会被互相锁住，因为数据行并不冲突。
+
+3.1.7        行锁兼容矩阵
+
+
+由于S锁和S锁是完全兼容的，因此在判别兼容性时只考虑持有的锁与请求的锁是这三种组合情形：X、S和S、X和X、X。
+
+另外，需要提醒注意的是进行兼容判断也只是针对于加锁涉及的行有交集的情形。
+
+分析兼容矩阵可以得出如下几个结论：
+
+INSERT操作之间不会有冲突。
+
+GAP,Next-Key会阻止Insert。
+
+GAP和Record,Next-Key不会冲突
+
+Record和Record、Next-Key之间相互冲突。
+
+已有的Insert锁不阻止任何准备加的锁。
+
+3.1.8   自增锁(AUTO-INC Locks)
+AUTO-INC锁是一种特殊的表级锁，发生涉及AUTO_INCREMENT列的事务性插入操作时产生。
+
+详情可查看官网说明
+
+ 
+
+3.2      锁的粒度
+就是通常我们所说的锁级别。MySQL有三种锁的级别：页级、表级、行级。
+
+相对其他数据库而言，MySQL的锁机制比较简单，其最 显著的特点是不同的存储引擎支持不同的锁机制。
+
+比如，MyISAM和MEMORY存储引擎采用的是表级锁（table-level locking）；BDB存储引擎采用的是页面锁（page-level locking），但也支持表级锁；InnoDB存储引擎既支持行级锁（row-level locking），也支持表级锁，但默认情况下是采用行级锁。
+
+MySQL这3种锁的特性可大致归纳如下：
+
+表级锁：开销小，加锁快；不会出现死锁；锁定粒度大，发生锁冲突的概率最高,并发度最低。
+
+行级锁：开销大，加锁慢；会出现死锁；锁定粒度最小，发生锁冲突的概率最低,并发度也最高。
+
+页面锁：开销和加锁时间界于表锁和行锁之间；会出现死锁；锁定粒度界于表锁和行锁之间，并发度一般。
+
+数据库引擎通常必须获取多粒度级别上的锁才能完整地保护资源。
+
+4      现网问题
+4.1      问题描述
+在现网中有一条delete语句导致大量的锁等待问题，把这个问题拿出来验证
+
+死锁日志在附件中。
+
+
+
+
+ 
+
+
+
+下面我们来做个验证，分以下两个场景：
+
+1.       单表，更新行操作，查询条件为索引列
+
+2.       两张表，删除行操作，查询条件为两个表的索引列，（跟现网问题一致）
+
+观察以上2种情况锁等待的情况。
+
+ 
+
+4.2      场景1验证
+创建表
+
+
+
+-Sql 代码
+01
+CREATE TABLE testindex  (
+02
+   id     int(11) NOT NULL AUTO_INCREMENT NOT NULL,
+03
+   id_2   int(11) NULL,
+04
+   name   varchar(100) NULL,
+05
+   PRIMARY KEY(id)
+06
+)
+07
+ENGINE = InnoDB
+08
+AUTO_INCREMENT = 0;
+09
+ 
+10
+CREATE INDEX idx_id_2 USING BTREE ON testindex(id_2);
+
+
+
+创建存储过程，构造数据（后面执行测试sql务必explain下，确保走索引，因为如果测试数据较少的话，可能优化器直接走全表扫描，那就导致锁住所有记录，这里插入1000行数据）
+
+-Sql 代码
+01
+CREATE PROCEDURE genData  (IN `n` int(11))
+02
+    SQL SECURITY DEFINER
+03
+    NOT DETERMINISTIC
+04
+    CONTAINS SQL
+05
+BEGIN
+06
+    DECLARE i INT DEFAULT 1;
+07
+    WHILE (i <= n ) DO
+08
+      INSERT into testindex  (id_2,name) VALUEs (FLOOR(RAND() * 1000),UUID());
+09
+            set i=i+1;
+10
+    END WHILE;
+11
+END
+12
+ 
+13
+//插入1000条数据
+14
+call genData(1000);
+ 
+
+
+
+ 
+
+查看锁情况：
+
+-Sql 代码
+1
+SELECT * FROM INFORMATION_SCHEMA.INNODB_LOCKS;
+2
+SELECT * FROM INFORMATION_SCHEMA.INNODB_LOCK_WAITS;
+3
+SELECT  * FROM INFORMATION_SCHEMA.INNODB_TRX;
+
+
+
+ 
+
+
+
+ 
+
+结论：
+
+当单表dml操作是，如果行锁在对应的索引列上，在该行上所有的dml操作都会等待！！
+
+ 
+
+4.3      场景2验证
+创建表testindex2:
+
+
+
+-Sql 代码
+01
+CREATE TABLE testindex2  (
+02
+   id     int(11) AUTO_INCREMENT NOT NULL,
+03
+   id_2   int(11) NULL,
+04
+   name   varchar(100) NULL,
+05
+   PRIMARY KEY(id)
+06
+)
+07
+ENGINE = InnoDB
+08
+AUTO_INCREMENT = 0;
+09
+ 
+10
+ 
+11
+CREATE INDEX idx_id2 USING BTREE  ON testindex2(id_2);
+12
+  
+13
+CREATE PROCEDURE genData2  (IN `n` int(11))
+14
+   SQL SECURITY DEFINER
+15
+   NOT DETERMINISTIC
+16
+   CONTAINS SQL
+17
+BEGIN
+18
+   DECLARE i INT DEFAULT 1;
+19
+    WHILE (i <= n ) DO
+20
+      INSERT into testindex2  (id_2,name) VALUEs (FLOOR(RAND() * 1000),UUID());
+21
+         set i=i+1;
+22
+    END WHILE;
+23
+END
+24
+ 
+25
+//插入1000条数据
+26
+call genData2(1000);
+
+
+
+
+
+
+
+会话A
+
+会话B
+
+begin;
+
+begin;
+
+delete a  from testindex a ,testindex2 b where a.id_2 = b.id_2 and  b.id_2=998;
+
+　
+
+　
+
+INSERT INTO testindex2(id_2, name)VALUES( 998, '123213');
+
+　
+
+50s后显示：
+ERROR 1205 (HY000): Lock wait timeout exceeded; try restarting transaction
+
+　
+
+INSERT INTO testindex2(id_2, name)VALUES( 997, '123213');
+
+　
+
+50s后显示：
+ERROR 1205 (HY000): Lock wait timeout exceeded; try restarting transaction
+
+　
+
+INSERT INTO testindex2(id_2, name)VALUES( 999, '123213');
+Query OK, 1 row affected (0.00 sec)
+
+分析：会话A的语句加了3个锁：  id_2=998 的record锁，  (996,998],(998,999] 两个gap锁
+      索引中排序是这样的：
+
+
+
+当插入id_2=997时，落在gap区间内，锁住。
+
+当插入id_2=999时，新插入记录 >  999,980这一列，不在区间内，插入成功。
+
+ 
+
+              结论：结合问题日志及现网情况来看，这个死锁是因为引入mycat组件后，这两个sql语句并发执行导致死锁，
+
+         正常的执行顺序是：先删除完成，再执行插入操作，不可能两者同时执行，现网去掉mycat，直接连接mysql，并没有发现这种类型的死锁。
+
+        所以问题可能还是出在mycat上面。
+
+ 
+
+ 
+
+5      解决方法
+5.1      分析锁语句
+1.     查看事务锁等待情况
+
+SELECT * FROM INFORMATION_SCHEMA.INNODB_LOCKS;
+
+SELECT * FROM INFORMATION_SCHEMA.INNODB_LOCK_WAITS;
+
+SELECT  * FROM INFORMATION_SCHEMA.INNODB_TRX;
+
+2.     查看最近死锁日志
+
+show engine innodb status;
+
+5.2      修改建议
+1）以固定的顺序访问表和行。将两个事务的sql顺序调整为一致，也能避免死锁。
+
+2）大事务拆小。大事务更倾向于死锁，如果业务允许，将大事务拆小。
+
+3）在同一个事务中，尽可能做到一次锁定所需要的所有资源，减少死锁概率。
+
+4）降低隔离级别。如果业务允许，将隔离级别调低也是较好的选择，比如将隔离级别从RR调整为RC，可以避免掉很多因为gap锁造成的死锁。
+
+5）为表添加合理的索引。可以看到如果不走索引将会为表的每一行记录添加上锁，死锁的概率大大增大。 本案例使用这一条解决
+
+ 
+
+6      参考资料
+1.     锁介绍：https://dev.mysql.com/doc/refman/5.6/en/innodb-locking.html#innodb-intention-locks
+
+2.     理解行锁：http://yeshaoting.cn/article/database/mysql%20insert%E9%94%81%E6%9C%BA%E5%88%B6/
+
+3.     insert锁：https://blog.csdn.net/cug_jiang126com/article/details/50596729
+
+4.     不同sql语句对应不同锁：https://dev.mysql.com/doc/refman/5.6/en/innodb-locks-set.html
+
+5.     死锁分析：https://blog.csdn.net/AlbertFly/article/details/78493245
+
+6.     锁介绍：http://hedengcheng.com/?p=771#_Toc374698322
+
+ 
+
+
+
+
