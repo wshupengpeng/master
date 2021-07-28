@@ -1,0 +1,221 @@
+今日总结：
+	1 数据库锁表问题：
+		mysql中对于同一张表不同数据进行更新时，如果上一个事务未commit，则导致锁表，
+		如果根据索引字段进行update，则只会进行行级锁。
+		解决办法： 建立索引，预防表级锁。
+    2 spring声明式事务：
+		spring默认使用runtimeException作为回滚异常，其他类型异常不回滚。
+		而任何Checked Exception 将不导致事务回滚；异常名字定义和TransactionProxyFactoryBean中含义一样
+		可以通过参数：rollback-for 和no-rollback-for 设置回滚异常种类和不回滚异常种类。
+	3 嵌套事务问题：
+	事务传播行为类型	说明
+	PROPAGATION_REQUIRED	如果当前没有事务，就新建一个事务，如果已经存在一个事务中，加入到这个事务中。这是最常见的选择。
+	PROPAGATION_SUPPORTS	支持当前事务，如果当前没有事务，就以非事务方式执行。
+	PROPAGATION_MANDATORY	使用当前的事务，如果当前没有事务，就抛出异常。
+	PROPAGATION_REQUIRES_NEW	新建事务，如果当前存在事务，把当前事务挂起。
+	PROPAGATION_NOT_SUPPORTED	以非事务方式执行操作，如果当前存在事务，就把当前事务挂起。
+	PROPAGATION_NEVER	以非事务方式执行，如果当前存在事务，则抛出异常。
+	PROPAGATION_NESTED	如果当前存在事务，则在嵌套事务内执行。如果当前没有事务，则执行与PROPAGATION_REQUIRED类似的操作。
+	
+	PROPAGATION_REQUIRED：
+		1 外围方法未开启事务-》方法1插入数据-》 方法2插入数据  -》外围方法抛出异常
+		   结果： 方法1 方法2 均插入成功，因为外围方法没有事务，required会另起事务运行，两个事务不冲突。
+		2 外围方法开启事务 -》方法1插入数据-》 方法2插入数据  -》外围方法抛出异常
+		   结果： 方法1 方法2 均插入不成功，因为外围方法有事务，required会加入当前事务运行，报错同时回滚。
+		3 外围方法开启事务-》方法1插入数据-》方法2插入数据抛出异常被捕获
+		   结果： 方法1 方法2 均插入不成功，因为外围方法有事务，外围方法和方法1、方法2均在同一事务下，方法2
+		   异常即使捕获异常也会被感知到，需要同时回滚，重点：required_new和nested被捕获均只有子事务回滚。
+3的例子： @Transactional
+    @Override
+    public void transaction_required_required_exception_try(){
+        User1 user1=new User1();
+        user1.setName("张三");
+        user1Service.addRequired(user1);
+        
+        User2 user2=new User2();
+        user2.setName("李四");
+        try {
+            user2Service.addRequiredException(user2);
+        } catch (Exception e) {
+            System.out.println("方法回滚");
+        }
+    }
+		
+	1的例子：@Override
+    public void notransaction_exception_required_required(){
+        User1 user1=new User1();
+        user1.setName("张三");
+        user1Service.addRequired(user1);
+        
+        User2 user2=new User2();
+        user2.setName("李四");
+        user2Service.addRequired(user2);
+        
+        throw new RuntimeException();
+    }
+	
+	PROPAGATION_REQUIRES_NEW：
+	1 外围方法未开启事务-》方法1插入数据-》 方法2插入数据  -》外围方法抛出异常
+	结果： 方法1 方法2 均插入成功，因为外围方法没有事务，required会另起事务运行，两个事务不冲突。
+	2 外围方法开启事务 -》方法1插入数据-》 方法2插入数据报错  
+	结果：方法1插入成功，方法2插入失败，因为外围方法事务和方法1、方法2事务均不为同一事务，不影响操作。
+	3 外围方法开启事务-》方法1插入数据-》方法2插入数据（required_new）-》方法3插入数据抛出异常被捕获
+	结果：方法1插入成功，方法2插入成功，方法3插入失败，因为外围方法事务和方法1、方法2、方法3事务
+	均不为同一事务，方法3异常回滚，异常被捕获，则外围方法不回滚。	
+2的例子：
+   @Override
+    public void notransaction_requiresNew_requiresNew_exception(){
+        User1 user1=new User1();
+        user1.setName("张三");
+        user1Service.addRequiresNew(user1);
+        
+        User2 user2=new User2();
+        user2.setName("李四");
+        user2Service.addRequiresNewException(user2);
+    }
+3的例子：
+  @Override
+    @Transactional(propagation = Propagation.REQUIRED)
+    public void transaction_required_requiresNew_requiresNew_exception_try(){
+        User1 user1=new User1();
+        user1.setName("张三");
+        user1Service.addRequired(user1);
+        
+        User2 user2=new User2();
+        user2.setName("李四");
+        user2Service.addRequiresNew(user2);
+        User2 user3=new User2();
+        user3.setName("王五");
+        try {
+            user2Service.addRequiresNewException(user3);
+        } catch (Exception e) {
+            System.out.println("回滚");
+        }
+    }
+	
+	PROPAGATION_NESTED：
+	验证方法1：
+
+    @Transactional
+    @Override
+    public void transaction_exception_nested_nested(){
+        User1 user1=new User1();
+        user1.setName("张三");
+        user1Service.addNested(user1);
+        
+        User2 user2=new User2();
+        user2.setName("李四");
+        user2Service.addNested(user2);
+        throw new RuntimeException();
+    }
+验证方法2：
+
+    @Transactional
+    @Override
+    public void transaction_nested_nested_exception(){
+        User1 user1=new User1();
+        user1.setName("张三");
+        user1Service.addNested(user1);
+        
+        User2 user2=new User2();
+        user2.setName("李四");
+        user2Service.addNestedException(user2);
+    }
+验证方法3：
+
+    @Transactional
+    @Override
+    public void transaction_nested_nested_exception_try(){
+        User1 user1=new User1();
+        user1.setName("张三");
+        user1Service.addNested(user1);
+        
+        User2 user2=new User2();
+        user2.setName("李四");
+        try {
+            user2Service.addNestedException(user2);
+        } catch (Exception e) {
+            System.out.println("方法回滚");
+        }
+    }
+	
+	
+验证方法序号	数据库结果	结果分析
+1	“张三”、“李四”均未插入。	外围方法开启事务，内部事务为外围事务的子事务，外围方法回滚，内部方法也要回滚。
+2	“张三”、“李四”均未插入。	外围方法开启事务，内部事务为外围事务的子事务，内部方法抛出异常回滚，且外围方法感知异常致使整体事务回滚。
+3	“张三”插入、“李四”未插入。	外围方法开启事务，内部事务为外围事务的子事务，插入“李四”内部方法抛出异常，可以单独对子事务回滚。
+
+
+ REQUIRED,REQUIRES_NEW,NESTED异同
+由“1.2 场景二”和“3.2 场景二”对比，我们可知：
+NESTED和REQUIRED修饰的内部方法都属于外围方法事务，如果外围方法抛出异常，这两种方法的事务都会被回滚。
+但是REQUIRED是加入外围方法事务，所以和外围事务同属于一个事务，一旦REQUIRED事务抛出异常被回滚，
+外围方法事务也将被回滚。而NESTED是外围方法的子事务，有单独的保存点，所以NESTED方法抛出异常被回滚，
+不会影响到外围方法的事务。
+
+由“2.2 场景二”和“3.2 场景二”对比，我们可知：
+NESTED和REQUIRES_NEW都可以做到内部方法事务回滚而不影响外围方法事务。但是因为NESTED是嵌套事务，
+所以外围方法回滚之后，作为外围方法事务的子事务也会被回滚。而REQUIRES_NEW是通过开启新的事务实现的，
+内部事务和外围事务是两个事务，外围事务回滚不会影响内部事务。
+	
+
+
+
+今日总结:
+1 构建AOP切面日志工作
+   遇到问题： （1） 切入点规则问题：通过切面表达式+@Annotation配合获取当前包下的请求接口+被log注解
+   包含的接口。
+   一、@Pointcut(value = "@annotation(com.huawei.annotation.Log) || " +"execution(public * com.huawei.api..*(..))")
+   二、基于注解作为切面方程的@Around(value = "@annotation(log)")  拦截所有带有Log注解的接口
+   三、多个point（）可以通过 || && ！来进行表达式的组合拓展
+   
+   （2） 切面返回值问题：
+		一、被代理类含有返回值，需要切面方程返回返回值，否则返回null值，如果返回值为基本数据类型且
+		代理类没有返回值，则会导致报错，原因在于如果代理方法返回值为void则默认返回null值，而基本数据
+		类型没有null值，导致报错。
+		解决方法：返回值设置为Object，获取被代理类的返回值对象，返回被代理类的返回值对象。
+		（ps：如果被代理类返回值为void，proceed执行后的结果为null）
+		二、将基本数据类型改为包装类，如果代理类返回值为null，则会报错，改为包装类则可以接受为null值。
+    扩展知识：可以通过args、bean 获取被代理类的参数信息，within、this、target、annotation获取指定注解内的方法
+	，注解类型也必须是全限定类型名，必须是在目标对象上声明这个注解，在接口上声明的对它不起作用。
+	
+	例子：
+		@Before(value=" args(param)", argNames="param") //明确指定了参数  
+		public void before1(String param) {  
+			System.out.println("===param:" + param);  
+		} 
+		如果“class文件中含有变量调试信息”将使用这些方法签名中的参数名来确定参数名；
+		
+		@Before(value=" args(param)") //不需要argNames了  
+		public void before1(JoinPoint jp, String param) {  
+			System.out.println("===param:" + param);  
+		}
+		
+		@Before(args(param) && target(bean) && @annotation(secure)",   
+				argNames="jp,param,bean,secure")  
+		public void before5(JoinPoint jp, String param,  
+		 IPointcutService pointcutService, Secure secure) {  
+		……  
+		} 
+		
+		解释： target必须写出实现的接口类型 args如果想要命中，必须写上所有的被代理类的请求参数，缺少一个都不能拦截。
+		annotation不用解释了。
+   （3） mybatis的日期字段精确到时分秒需要使用jdbcType=TIMESTAMP类型。
+   （4） mybatis的<foreach>标签中的collection当数据为list时使用list，如果加上@Param注解则注解Id为准。
+   （5） 通过spring的LocalVariableTableParameterNameDiscoverer可以通过反射获取Method中的参数名。
+	 LocalVariableTableParameterNameDiscoverer discoverer=new LocalVariableTableParameterNameDiscoverer();
+        String[] parameterNames = discoverer.getParameterNames(method);
+		parameterNames 不为null遍历即可获取方法上的参数名称。
+   （6）可以通过当前方法获取当前线程下的request对象。 
+     ((ServletRequestAttributes) RequestContextHolder.getRequestAttributes()).getRequest();
+   
+	
+   
+   
+   
+  
+
+
+
+
+	
