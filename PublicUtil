@@ -1,0 +1,653 @@
+import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.JSONArray;
+import com.alibaba.fastjson.JSONObject;
+import com.huawei.it.oem.po.constants.CommonConstant;
+import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.apache.tomcat.util.buf.MessageBytes;
+import org.apache.tomcat.util.http.MimeHeaders;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.ResponseEntity;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.web.bind.annotation.RequestMapping;
+
+import javax.servlet.http.HttpServletRequest;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
+import java.util.zip.GZIPInputStream;
+
+public class PublicUtil {
+
+    private static final int LETTER_COUNTS = 26;
+
+    private static final int LOWERCASE_BEGIN_CHAR = 97;
+
+    private static final int LOWERCASE_END_CHAR = 122;
+
+    private static final int LOWERCASE_UPPERCASE_CHAR = 32;
+
+    private static final BitSet ASCII_QUERY_CHARS;
+
+    static {
+        char[] charUnreserved = "_-!.~'()*".toCharArray();//plus alphanum
+        char[] charPunct = ",;:$&+=".toCharArray();
+        char[] charReserved = "?/[]@".toCharArray();//plus punct
+
+        ASCII_QUERY_CHARS = new BitSet(CommonConstant.INT_128);
+        for (char charac = 'a'; charac <= 'z'; charac++)
+            ASCII_QUERY_CHARS.set(charac);
+        for (char charac = 'A'; charac <= 'Z'; charac++)
+            ASCII_QUERY_CHARS.set(charac);
+        for (char charac = '0'; charac <= '9'; charac++)
+            ASCII_QUERY_CHARS.set(charac);
+        for (char charac : charUnreserved)
+            ASCII_QUERY_CHARS.set(charac);
+        for (char charac : charPunct)
+            ASCII_QUERY_CHARS.set(charac);
+        for (char charac : charReserved)
+            ASCII_QUERY_CHARS.set(charac);
+
+        ASCII_QUERY_CHARS.set('%');//leave existing percent escapes in place
+    }
+
+    public static String toUpperCaseFirstWord(String str) {
+        char[] chars = str.toCharArray();
+        if (chars[0] >= LOWERCASE_BEGIN_CHAR && chars[0] <= LOWERCASE_END_CHAR)
+            chars[0] ^= LOWERCASE_UPPERCASE_CHAR;
+        return String.valueOf(chars);
+    }
+
+    /**
+     * 干扰因素 "( （ _ - "等等
+     *
+     * @param str1
+     * @param str2
+     * @return 比较结果
+     */
+    public static Boolean equalsIgnoreInfluenceFactors(String str1, String str2) {
+        return StringUtils.equals(removeInfluenceFactors(str1), removeInfluenceFactors(str2));
+    }
+
+    public static String removeInfluenceFactors(String source) {
+        if (source == null)
+            return null;
+        return source.replace("(", "")
+                .replace(")", "")
+                .replace("（", "")
+                .replace("）", "")
+                .replace("_", "")
+                .replace("-", "")
+                .replace(" ", "")
+                .replace("\n", "")
+                .toLowerCase();
+    }
+
+    /**
+     * 判断字符串是否为数据
+     *
+     * @param source
+     * @return boolean
+     **/
+    public static boolean isNumber(String source) {
+        if (StringUtils.isEmpty(source))
+            return false;
+        try {
+            Double.parseDouble(source);
+            return true;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
+
+    /**
+     * 数字转字母 1-26 ： A-Z
+     *
+     * @param num
+     * @return 字符串结果
+     */
+    public static String numberToLetter(int num) {
+        if (num <= 0) {
+            return null;
+        }
+        String letter = "";
+        num--;
+        do {
+            if (letter.length() > 0) {
+                num--;
+            }
+            letter = (char) (num % LETTER_COUNTS + (int) 'A') + letter;
+            num = (num - num % LETTER_COUNTS) / LETTER_COUNTS;
+        } while (num > 0);
+
+        return letter;
+    }
+
+    public static CharSequence encodeUriQuery(CharSequence in, boolean encodePercent) {
+        //Note that I can't simply use URI.java to encode because it will escape pre-existing escaped things.
+        StringBuilder outBuf = null;
+        Formatter formatter = null;
+        try {
+            for (int i = 0; i < in.length(); i++) {
+                char c = in.charAt(i);
+                boolean escape = true;
+                if (c < CommonConstant.INT_128) {
+                    if (ASCII_QUERY_CHARS.get((int) c) && !(encodePercent && c == '%')) {
+                        escape = false;
+                    }
+                } else if (!Character.isISOControl(c) && !Character.isSpaceChar(c)) { //not-ascii
+                    escape = false;
+                }
+                if (!escape) {
+                    if (outBuf != null)
+                        outBuf.append(c);
+                } else {
+                    //escape
+                    if (outBuf == null) {
+                        outBuf = new StringBuilder(in.length() + CommonConstant.INT_5 * CommonConstant.INT_3);
+                        outBuf.append(in, 0, i);
+                        formatter = new Formatter(outBuf);
+                    }
+                    //leading %, 0 padded, width 2, capital hex
+                    if (formatter == null)
+                        formatter = new Formatter();
+                    formatter.format("%%%02X", (int) c);
+                }
+            }
+        } finally {
+            if (formatter != null)
+                formatter.close();
+        }
+        return outBuf != null ? outBuf : in;
+    }
+
+    /**
+     * 从JSON 中获取指定 key的值
+     *
+     * @param json
+     * @param targetKey
+     * @return value
+     */
+    public static String getParamJson(String json, String targetKey) {
+        if (targetKey.contains("."))
+            return getMultiLevelParamJson(json, targetKey);
+        Object parse = JSON.parse(json);
+        Object result = null;
+        if (parse == null)
+            return "";
+        if (parse instanceof JSONObject)
+            result = getParamJsonObject((JSONObject) parse, targetKey);
+        if (parse instanceof JSONArray)
+            result = getParamJsonArray((JSONArray) parse, targetKey);
+        return result == null ? "" : result.toString();
+    }
+
+    /**
+     * 从JSON 中获取指定 key的值
+     *
+     * @param json
+     * @param targetKey
+     * @return value list
+     */
+    public static List<String> getParamsJson(String json, String targetKey) {
+        if (targetKey.contains("."))
+            return getMultiLevelParamsJson(json, targetKey);
+        Object parse = JSON.parse(json);
+        List<Object> result = null;
+        if (parse == null)
+            return new ArrayList<>();
+        if (parse instanceof JSONObject)
+            result = getParamsJsonObject((JSONObject) parse, targetKey);
+        if (parse instanceof JSONArray)
+            result = getParamsJsonArray((JSONArray) parse, targetKey);
+        return CollectionUtils.isEmpty(result) ? new ArrayList<>()
+                : result.parallelStream().map(Object::toString).collect(Collectors.toList());
+    }
+
+    /**
+     * 从JSON 中获取指定 key的值
+     *
+     * @param json
+     * @param targetKey data.status 结构
+     * @return value
+     */
+    public static String getMultiLevelParamJson(String json, String targetKey) {
+        Object parse = JSON.parse(json);
+        String[] targetKeys = targetKey.split("\\.");
+        Object result = parse;
+        for (int i = 0; i < targetKeys.length; i++) {
+            String targetKeyI = targetKeys[i];
+            if (result == null)
+                return "";
+            if (result instanceof JSONObject) {
+                result = getParamJsonObject((JSONObject) result, targetKeyI);
+                continue;
+            }
+            if (result instanceof JSONArray)
+                result = getParamJsonArray((JSONArray) result, targetKeyI);
+        }
+        return result == null ? "" : result.toString();
+    }
+
+    /**
+     * 从JSON 中获取指定 key的值
+     *
+     * @param json
+     * @param targetKey data.status 结构
+     * @return value list
+     */
+    public static List<String> getMultiLevelParamsJson(String json, String targetKey) {
+        Object parse = JSON.parse(json);
+        List<Object> tempParse;
+        List<Object> results = new ArrayList<Object>() {
+            {
+                add(parse);
+            }
+        };
+        String[] targetKeys = targetKey.split("\\.");
+        for (int i = 0; i < targetKeys.length; i++) {
+            tempParse = results;
+            results = new ArrayList<>();
+            String targetKeyI = targetKeys[i];
+            for (int j = 0; j < tempParse.size(); j++) {
+                Object eachParse = tempParse.get(j);
+                if (eachParse == null)
+                    return new ArrayList<>();
+                if (eachParse instanceof JSONObject)
+                    results.addAll(getParamsJsonObject((JSONObject) eachParse, targetKeyI));
+                if (eachParse instanceof JSONArray)
+                    results.addAll(getParamsJsonArray((JSONArray) eachParse, targetKeyI));
+            }
+        }
+        return CollectionUtils.isEmpty(results) ? new ArrayList<>()
+                : results.parallelStream().map(Object::toString).collect(Collectors.toList());
+    }
+
+    /**
+     * 从JSONObject 中获取指定 key的值
+     *
+     * @param jsonObject
+     * @param targetKey
+     * @return value
+     */
+    public static Object getParamJsonObject(JSONObject jsonObject, String targetKey) {
+        Object paramId = null;
+        Set<Map.Entry<String, Object>> entries = jsonObject.entrySet();
+        if (CollectionUtils.isEmpty(entries))
+            return null;
+        Object result = jsonObject.get(targetKey);
+        if (result != null)
+            return result;
+        for (Map.Entry<String, Object> entry : entries) {
+            String key = entry.getKey();
+            Object value = entry.getValue();
+            if (PublicUtil.equalsIgnoreInfluenceFactors(targetKey, key)) {
+                if (null == value)
+                    return null;
+                return value;
+            } else if (value instanceof JSONObject) {
+                JSONObject valueJsonObject = (JSONObject) value;
+                if ((paramId = getParamJsonObject(valueJsonObject, targetKey)) != null)
+                    return paramId;
+            } else if (value instanceof JSONArray) {
+                JSONArray valueJsonArray = (JSONArray) value;
+                if ((paramId = getParamJsonArray(valueJsonArray, targetKey)) != null)
+                    return paramId;
+            }
+        }
+        return paramId;
+    }
+
+    /**
+     * 从JSONArray 中获取指定 key的值
+     *
+     * @param jsonArray
+     * @param targetKey
+     * @return value
+     */
+    public static Object getParamJsonArray(JSONArray jsonArray, String targetKey) {
+        AtomicReference<Object> paramId = new AtomicReference<>();
+        jsonArray.parallelStream().forEach(valueJson -> {
+            if (valueJson instanceof JSONObject) {
+                JSONObject valueJsonObject = (JSONObject) valueJson;
+                Object tempParamId;
+                if ((tempParamId = getParamJsonObject(valueJsonObject, targetKey)) != null)
+                    paramId.set(tempParamId);
+            } else {
+                JSONArray valueJsonArray = (JSONArray) valueJson;
+                Object tempParamId;
+                if ((tempParamId = getParamJsonArray(valueJsonArray, targetKey)) != null)
+                    paramId.set(tempParamId);
+            }
+        });
+        return paramId.get();
+    }
+
+    /**
+     * 从JSONObject 中获取指定 key的值
+     *
+     * @param jsonObject
+     * @param targetKey
+     * @return value
+     */
+    public static List<Object> getParamsJsonObject(JSONObject jsonObject, String targetKey) {
+        List<Object> paramValues = new CopyOnWriteArrayList<>();
+        Set<Map.Entry<String, Object>> entries = jsonObject.entrySet();
+        if (CollectionUtils.isEmpty(entries))
+            return null;
+        List<Object> temp;
+        for (Map.Entry<String, Object> entry : entries) {
+            String key = entry.getKey();
+            Object value = entry.getValue();
+            if (PublicUtil.equalsIgnoreInfluenceFactors(targetKey, key)) {
+                if (null == value)
+                    return null;
+                paramValues.add(value);
+            } else if (value instanceof JSONObject) {
+                JSONObject valueJsonObject = (JSONObject) value;
+                if (CollectionUtils.isEmpty(temp = getParamsJsonObject(valueJsonObject, targetKey)))
+                    return paramValues;
+                paramValues.addAll(temp);
+            } else if (value instanceof JSONArray) {
+                JSONArray valueJsonArray = (JSONArray) value;
+                if (CollectionUtils.isEmpty(temp = getParamsJsonArray(valueJsonArray, targetKey)))
+                    return paramValues;
+                paramValues.addAll(temp);
+            }
+        }
+        return paramValues;
+    }
+
+    /**
+     * 从JSONArray 中获取指定 key的值
+     *
+     * @param jsonArray
+     * @param targetKey
+     * @return value list
+     */
+    public static List<Object> getParamsJsonArray(JSONArray jsonArray, String targetKey) {
+        List<Object> paramValues = new CopyOnWriteArrayList<>();
+        jsonArray.parallelStream().forEach(valueJson -> {
+            List<Object> temp;
+            if (valueJson instanceof JSONObject) {
+                JSONObject valueJsonObject = (JSONObject) valueJson;
+                if (CollectionUtils.isNotEmpty(temp = getParamsJsonObject(valueJsonObject, targetKey)))
+                    paramValues.addAll(temp);
+            } else {
+                JSONArray valueJsonArray = (JSONArray) valueJson;
+                if (CollectionUtils.isNotEmpty(temp = getParamsJsonArray(valueJsonArray, targetKey)))
+                    paramValues.addAll(temp);
+            }
+        });
+        return paramValues;
+    }
+
+    /**
+     * 获取path上的占位符与对应参数的映射
+     *
+     * @param request
+     * @param requestMapping
+     * @return map
+     */
+    public static Map<String, Object> getPathParam(HttpServletRequest request, RequestMapping requestMapping) {
+        Map<String, Object> pathParamMapValue = new HashMap<>();
+        String requestURI = request.getRequestURI();
+        String contextPath = request.getContextPath();
+        String withoutContextPath = requestURI.replace(contextPath, "");
+        String[] pathSpilts = withoutContextPath.split("/");
+        String path = placeholderPathStr(withoutContextPath, requestMapping);
+        String[] placeholderPaths = path.split("/");
+        for (int i = 0; i < placeholderPaths.length; i++) {
+            String pathSpiltStr = pathSpilts[i];
+            String placeholderPathStr = placeholderPaths[i];
+            if (placeholderPathStr.contains("{")) {
+                pathParamMapValue.put(placeholderPathStr.replace("{", "").replace("}", ""), pathSpiltStr);
+            }
+        }
+        return pathParamMapValue;
+    }
+
+    /**
+     * 获取requestMapping上的path
+     *
+     * @param realPath
+     * @param requestMapping
+     * @return path value
+     */
+    public static String placeholderPathStr(String realPath, RequestMapping requestMapping) {
+        String[] paths = requestMapping.path();
+        String[] pathSpilts = realPath.split("/");
+        for (String path : paths) {
+            String[] placeholderPaths = path.split("/");
+            if (placeholderPaths.length != pathSpilts.length)
+                continue;
+            boolean flag = true;
+            for (int i = 0; i < placeholderPaths.length; i++) {
+                String pathSpiltStr = pathSpilts[i];
+                String placeholderPathStr = placeholderPaths[i];
+                if (placeholderPathStr.contains("{")) {
+                    continue;
+                } else if (!pathSpiltStr.equals(placeholderPathStr)) {
+                    flag = false;
+                    break;
+                } else continue;
+            }
+            if (flag)
+                return path;
+        }
+        return null;
+    }
+
+    /**
+     * 获取coyoteRequest
+     *
+     * @param request
+     * @return obj
+     */
+    public static Object getCoyoteRequest(HttpServletRequest request) {
+        Field requestField = ReflectionUtils.findField(request.getClass(), "request");
+        if (requestField == null)
+            return null;
+        ReflectionUtils.makeAccessible(requestField);
+        Object requestObj = ReflectionUtils.getField(requestField, request);
+        if (requestObj == null)
+            return null;
+        Field coyoteRequestField = ReflectionUtils.findField(requestObj.getClass(), "coyoteRequest");
+        if (coyoteRequestField == null)
+            return null;
+        ReflectionUtils.makeAccessible(coyoteRequestField);
+        Object coyoteRequest = ReflectionUtils.getField(coyoteRequestField, requestObj);
+        return coyoteRequest;
+    }
+
+    /**
+     * 获取请求头
+     *
+     * @param request
+     * @return header
+     */
+    public static MimeHeaders getMimeHeaders(HttpServletRequest request) {
+        Object coyoteRequest = PublicUtil.getCoyoteRequest(request);
+        if (coyoteRequest == null)
+            return null;
+        Field headersField = ReflectionUtils.findField(coyoteRequest.getClass(), "headers");
+        if (headersField == null)
+            return null;
+        ReflectionUtils.makeAccessible(headersField);
+        MimeHeaders headers = (MimeHeaders) ReflectionUtils.getField(headersField, coyoteRequest);
+        return headers;
+    }
+
+    /**
+     * 获取coyoteRequest
+     * @param response
+     * @return
+     */
+    /*public static Object getCoyoteResponse(HttpServletResponse response) {
+        Field responseField = ReflectionUtils.findField(response.getClass(), "response");
+        ReflectionUtils.makeAccessible(responseField);
+        Response  responseObj = ReflectionUtils.getField(responseField, response);
+        Field coyoteRequestField = ReflectionUtils.findField(responseObj.getClass(), "coyoteRequest");
+        ReflectionUtils.makeAccessible(coyoteRequestField);
+        Object coyoteRequest = ReflectionUtils.getField(coyoteRequestField, requestObj);
+        return coyoteRequest;
+    }*/
+
+    /**
+     * 获取请求头
+     * @param request
+     * @return
+     */
+    /*public static MimeHeaders getMimeHeaders(HttpServletRequest request) {
+        Object coyoteRequest = PublicUtil.getCoyoteRequest(request);
+        Field headersField = ReflectionUtils.findField(coyoteRequest.getClass(), "headers");
+        ReflectionUtils.makeAccessible(headersField);
+        MimeHeaders headers = (MimeHeaders)ReflectionUtils.getField(headersField, coyoteRequest);
+        return headers;
+    }*/
+
+    /**
+     * 处理响应体
+     *
+     * @param source
+     * @return ResponseEntity
+     * @throws IOException
+     */
+    public static ResponseEntity<String> processStringResonseEntity(ResponseEntity<String> source) throws IOException {
+        HttpHeaders headers = source.getHeaders();
+        String body = source.getBody(), newBody = body;
+        List<String> contentEncodings = getHeader(headers, "content-encoding");
+        String gzip = contentEncodings.parallelStream()
+                .filter(contentEncoding -> contentEncoding.equalsIgnoreCase("gzip"))
+                .findAny()
+                .orElse(null);
+        if (gzip != null && body != null)
+            newBody = unGZip(body);
+        return new ResponseEntity<>(newBody, headers, source.getStatusCode());
+    }
+
+    /**
+     * 处理响应体
+     *
+     * @param source
+     * @return ResponseEntity
+     * @throws IOException
+     */
+    public static ResponseEntity<byte[]> processResonseEntity(ResponseEntity<byte[]> source) throws IOException {
+        HttpHeaders headers = source.getHeaders();
+        byte[] body = source.getBody(), newBody = body;
+        List<String> contentEncodings = getHeader(headers, "content-encoding");
+        String gzip = contentEncodings.parallelStream()
+                .filter(contentEncoding -> contentEncoding.equalsIgnoreCase("gzip"))
+                .findAny()
+                .orElse(null);
+        if (gzip != null && body != null)
+            newBody = unGZip(body);
+        return new ResponseEntity<>(newBody, headers, source.getStatusCode());
+    }
+
+    /**
+     * Gzip解压缩
+     *
+     * @param inputStream
+     * @return byte[]
+     * @throws IOException
+     */
+    public static byte[] unGZip(InputStream inputStream) throws IOException {
+        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+        try (GZIPInputStream gzipInputStream = new GZIPInputStream(inputStream)) {
+            byte[] buf = new byte[CommonConstant.INT_4096];
+            int len = -1;
+            while ((len = gzipInputStream.read(buf, 0, buf.length)) != -1) {
+                byteArrayOutputStream.write(buf, 0, len);
+            }
+            return byteArrayOutputStream.toByteArray();
+        } finally {
+            byteArrayOutputStream.close();
+        }
+    }
+
+    /**
+     * Gzip解压缩
+     *
+     * @param source
+     * @return byte[]
+     * @throws IOException
+     */
+    public static byte[] unGZip(byte[] source) throws IOException {
+        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+        try (GZIPInputStream gzipInputStream = new GZIPInputStream(new ByteArrayInputStream(source))) {
+            byte[] buf = new byte[CommonConstant.INT_4096];
+            int len = -1;
+            while ((len = gzipInputStream.read(buf, 0, buf.length)) != -1) {
+                byteArrayOutputStream.write(buf, 0, len);
+            }
+            return byteArrayOutputStream.toByteArray();
+        } finally {
+            byteArrayOutputStream.close();
+        }
+    }
+
+    /**
+     * Gzip解压缩
+     *
+     * @param source
+     * @return 解压后的字符串
+     * @throws IOException
+     */
+    public static String unGZip(String source) throws IOException {
+        ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
+        try (GZIPInputStream gzipInputStream = new GZIPInputStream(
+                new ByteArrayInputStream(source.getBytes(StandardCharsets.UTF_8)))) {
+            byte[] buf = new byte[CommonConstant.INT_4096];
+            int len = -1;
+            while ((len = gzipInputStream.read(buf, 0, buf.length)) != -1) {
+                byteArrayOutputStream.write(buf, 0, len);
+            }
+            return new String(byteArrayOutputStream.toByteArray(), StandardCharsets.UTF_8);
+        } finally {
+            byteArrayOutputStream.close();
+        }
+    }
+
+    /**
+     * 获取头中是否包含指定名(忽略大小写)
+     *
+     * @param headers
+     * @param headerName
+     * @return str
+     */
+    public static List<String> getHeader(HttpHeaders headers, String headerName) {
+        for (Map.Entry<String, List<String>> entry : headers.entrySet()) {
+            if (entry.getKey().equalsIgnoreCase(headerName)) {
+                return entry.getValue();
+            }
+        }
+        return new ArrayList<>();
+    }
+
+    /**
+     * 重写request的uri
+     * @param request
+     * @param newURI
+     */
+    public static void rewriteUri(HttpServletRequest request, String newURI) {
+        Object coyoteRequest = getCoyoteRequest(request);
+        if (coyoteRequest == null)
+            return;
+        Field uriMBField = ReflectionUtils.findField(coyoteRequest.getClass(), "uriMB");
+        if (uriMBField == null)
+            return;
+        ReflectionUtils.makeAccessible(uriMBField);
+        MessageBytes uriMB = (MessageBytes) ReflectionUtils.getField(uriMBField, coyoteRequest);
+        if (uriMB != null)
+            uriMB.setString(newURI);
+    }
+}
