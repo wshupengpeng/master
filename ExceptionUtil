@@ -1,0 +1,57 @@
+import org.apache.commons.lang3.StringUtils;
+
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
+import java.io.UnsupportedEncodingException;
+import java.util.Objects;
+
+public class ExceptionUtil {
+
+    /**
+     * 获取全部的异常信息
+     * @param e {@link Throwable}
+     * @return str
+     */
+    public static String getAllExceptionMsg(Throwable e) {
+        Throwable cause = e;
+        StringBuilder strBuilder = new StringBuilder();
+
+        while (cause != null && !StringUtils.isEmpty(cause.getMessage())) {
+            strBuilder.append("caused: ").append(cause.getMessage()).append(";");
+            cause = cause.getCause();
+        }
+
+        return strBuilder.toString();
+    }
+
+    /**
+     * 获取cause
+     * @param t {@link Throwable}
+     * @return throwable
+     */
+    public static Throwable getCause(final Throwable t) {
+        final Throwable cause = t.getCause();
+        if (Objects.isNull(cause)) {
+            return t;
+        }
+        return cause;
+    }
+
+    /**
+     * 获取栈信息
+     * @param t {@link Throwable}
+     * @return str
+     * @throws UnsupportedEncodingException
+     */
+    public static String getStackTrace(final Throwable t) throws UnsupportedEncodingException {
+        if (t == null) {
+            return "";
+        }
+
+        final ByteArrayOutputStream out = new ByteArrayOutputStream();
+        final PrintStream ps = new PrintStream(out, false, "utf-8");
+        t.printStackTrace(ps);
+        ps.flush();
+        return new String(out.toByteArray(), "utf-8");
+    }
+}
